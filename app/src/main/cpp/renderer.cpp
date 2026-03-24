@@ -45,7 +45,11 @@ void main(){
 static const char* kVertSimple = R"(#version 300 es
 layout(location=0) in vec3 aPos;
 uniform mat4 uMVP;
-void main(){ gl_Position=uMVP*vec4(aPos,1.0); })";
+uniform float uPointSize;
+void main(){
+    gl_Position  = uMVP * vec4(aPos, 1.0);
+    gl_PointSize = uPointSize;   // ES 3.0: point size set in shader
+})";
 
 static const char* kFragSimple = R"(#version 300 es
 precision mediump float;
@@ -226,6 +230,7 @@ void Renderer::draw(){
             glBufferSubData(GL_ARRAY_BUFFER,0,sizeof(pts),pts);
             glBindVertexArray(m_rulerVao);
             glUniform4f(glGetUniformLocation(m_wireProg,"uColor"),1.0f,1.0f,0.0f,1.0f);
+            glUniform1f(glGetUniformLocation(m_wireProg,"uPointSize"),1.0f);
             glLineWidth(2.5f); glDrawArrays(GL_LINES,0,2);
             glBindVertexArray(0);
         }
@@ -239,7 +244,8 @@ void Renderer::draw(){
         glBufferSubData(GL_ARRAY_BUFFER,0,dotCount*12,dotPts);
         glBindVertexArray(m_rulerVao);
         glUniform4f(glGetUniformLocation(m_wireProg,"uColor"),1.0f,0.3f,0.3f,1.0f);
-        glPointSize(10.0f); glDrawArrays(GL_POINTS,0,dotCount);
+        glUniform1f(glGetUniformLocation(m_wireProg,"uPointSize"),12.0f); // ES3: point size via shader
+        glDrawArrays(GL_POINTS,0,dotCount);
         glBindVertexArray(0);
         glEnable(GL_DEPTH_TEST);
     }

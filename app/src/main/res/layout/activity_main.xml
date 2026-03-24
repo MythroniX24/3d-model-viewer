@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1E1E22">
+
+    <!-- Full-screen GL Surface -->
+    <com.modelviewer3d.ModelGLSurfaceView
+        android:id="@+id/glSurface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Top toolbar overlay -->
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:background="#CC1A1A1F">
+
+        <!-- Open File -->
+        <ImageButton
+            android:id="@+id/btnOpen"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_folder"
+            android:contentDescription="Open file" />
+
+        <!-- Edit / Properties -->
+        <ImageButton
+            android:id="@+id/btnEdit"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_tune"
+            android:contentDescription="Edit properties" />
+
+        <!-- Undo -->
+        <ImageButton
+            android:id="@+id/btnUndo"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_undo"
+            android:contentDescription="Undo" />
+
+        <!-- Redo -->
+        <ImageButton
+            android:id="@+id/btnRedo"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_redo"
+            android:contentDescription="Redo" />
+
+        <!-- Screenshot -->
+        <ImageButton
+            android:id="@+id/btnScreenshot"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_screenshot"
+            android:contentDescription="Screenshot" />
+
+        <!-- Spacer -->
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <!-- Reset Camera -->
+        <ImageButton
+            android:id="@+id/btnReset"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_reset"
+            android:contentDescription="Reset camera" />
+
+        <!-- FPS counter -->
+        <TextView
+            android:id="@+id/tvFps"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-- FPS"
+            android:textColor="#88FFFFFF"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:paddingStart="8dp" />
+
+    </LinearLayout>
+
+    <!-- Center hint shown before any model is loaded -->
+    <TextView
+        android:id="@+id/tvHint"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:text="Tap 📂 to open a 3D model\n(OBJ · STL · GLB)"
+        android:textColor="#66FFFFFF"
+        android:textSize="16sp"
+        android:gravity="center"
+        android:lineSpacingMultiplier="1.4" />
+
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

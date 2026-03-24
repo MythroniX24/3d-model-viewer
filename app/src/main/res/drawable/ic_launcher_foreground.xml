@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Foreground layer of the adaptive icon: 3D cube wireframe -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer glow ring -->
+    <path
+        android:fillColor="#1A4FC3F7"
+        android:pathData="M54,10 C29.7,10 10,29.7 10,54 C10,78.3 29.7,98 54,98 C78.3,98 98,78.3 98,54 C98,29.7 78.3,10 54,10 Z"/>
+
+    <!-- Cube back-bottom edge (dim cyan) -->
+    <path
+        android:strokeColor="#4D4FC3F7"
+        android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M32,62 L54,72 L76,62"/>
+    <!-- Cube back-left edge (dim) -->
+    <path
+        android:strokeColor="#4D4FC3F7"
+        android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M32,62 L32,40"/>
+    <!-- Cube back-right edge (dim) -->
+    <path
+        android:strokeColor="#4D4FC3F7"
+        android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M76,62 L76,40"/>
+    <!-- Cube top edge back (dim) -->
+    <path
+        android:strokeColor="#4D4FC3F7"
+        android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M32,40 L54,30 L76,40"/>
+
+    <!-- Cube front-bottom edge (bright cyan) -->
+    <path
+        android:strokeColor="#FF4FC3F7"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M32,62 L54,72 L76,62"/>
+    <!-- Cube front-left pillar -->
+    <path
+        android:strokeColor="#FF4FC3F7"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M32,40 L32,62"/>
+    <!-- Cube front-right pillar -->
+    <path
+        android:strokeColor="#FF4FC3F7"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M76,40 L76,62"/>
+    <!-- Cube top edge front -->
+    <path
+        android:strokeColor="#FF4FC3F7"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M32,40 L54,30 L76,40"/>
+    <!-- Cube left face diagonal -->
+    <path
+        android:strokeColor="#FF4FC3F7"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M54,72 L54,50 L32,40"/>
+    <!-- Cube right face diagonal -->
+    <path
+        android:strokeColor="#FF4FC3F7"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M54,50 L76,40"/>
+    <!-- Cube center vertical -->
+    <path
+        android:strokeColor="#FF4FC3F7"
+        android:strokeWidth="2.5"
+        android:fillColor="#00000000"
+        android:pathData="M54,30 L54,50"/>
+
+    <!-- Corner dots -->
+    <path android:fillColor="#FF4FC3F7" android:pathData="M54,28 A2,2 0 1,1 54,32 A2,2 0 1,1 54,28 Z"/>
+    <path android:fillColor="#FF4FC3F7" android:pathData="M30,39 A2,2 0 1,1 30,43 A2,2 0 1,1 30,39 Z"/>
+    <path android:fillColor="#FF4FC3F7" android:pathData="M74,39 A2,2 0 1,1 74,43 A2,2 0 1,1 74,39 Z"/>
+    <path android:fillColor="#FF4FC3F7" android:pathData="M30,60 A2,2 0 1,1 30,64 A2,2 0 1,1 30,60 Z"/>
+    <path android:fillColor="#FF4FC3F7" android:pathData="M74,60 A2,2 0 1,1 74,64 A2,2 0 1,1 74,60 Z"/>
+    <path android:fillColor="#FF4FC3F7" android:pathData="M54,70 A2,2 0 1,1 54,74 A2,2 0 1,1 54,70 Z"/>
+    <path android:fillColor="#FF4FC3F7" android:pathData="M54,48 A2,2 0 1,1 54,52 A2,2 0 1,1 54,48 Z"/>
+</vector>

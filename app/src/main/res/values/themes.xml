@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ModelViewer3D" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#1E1E22</item>
+        <item name="colorPrimaryVariant">#2C2C33</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#4FC3F7</item>
+        <item name="colorOnSecondary">#000000</item>
+        <item name="colorSurface">#2C2C33</item>
+        <item name="colorOnSurface">#FFFFFF</item>
+        <item name="android:colorBackground">#1E1E22</item>
+        <item name="android:statusBarColor">#1A1A1F</item>
+        <item name="android:navigationBarColor">#1A1A1F</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- Toolbar icon button style -->
+    <style name="ToolbarBtn">
+        <item name="android:layout_width">44dp</item>
+        <item name="android:layout_height">44dp</item>
+        <item name="android:padding">10dp</item>
+        <item name="android:background">?attr/selectableItemBackgroundBorderless</item>
+        <item name="android:tint">#DDDDDD</item>
+    </style>
+</resources>

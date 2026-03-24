@@ -1,99 +1,150 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.coordinatorlayout.widget.CoordinatorLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#1E1E22">
+    android:background="#1A1A20">
 
     <!-- Full-screen GL Surface -->
     <com.modelviewer3d.ModelGLSurfaceView
         android:id="@+id/glSurface"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent"/>
 
-    <!-- Top toolbar overlay -->
+    <!-- ══ TOP TOOLBAR ══════════════════════════════════════════════════════ -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
         android:layout_height="56dp"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:background="#CC1A1A1F">
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:background="#CC12121A"
+        android:elevation="4dp">
 
-        <!-- Open File -->
+        <ImageButton android:id="@+id/btnOpen"       style="@style/ToolbarBtn" android:src="@drawable/ic_folder"     android:contentDescription="Open"/>
+        <ImageButton android:id="@+id/btnEdit"       style="@style/ToolbarBtn" android:src="@drawable/ic_tune"       android:contentDescription="Edit"/>
+        <ImageButton android:id="@+id/btnUndo"       style="@style/ToolbarBtn" android:src="@drawable/ic_undo"       android:contentDescription="Undo"/>
+        <ImageButton android:id="@+id/btnRedo"       style="@style/ToolbarBtn" android:src="@drawable/ic_redo"       android:contentDescription="Redo"/>
+        <ImageButton android:id="@+id/btnScreenshot" style="@style/ToolbarBtn" android:src="@drawable/ic_screenshot" android:contentDescription="Screenshot"/>
+
+        <!-- Ruler tool button -->
         <ImageButton
-            android:id="@+id/btnOpen"
+            android:id="@+id/btnRuler"
             style="@style/ToolbarBtn"
-            android:src="@drawable/ic_folder"
-            android:contentDescription="Open file" />
+            android:src="@drawable/ic_ruler"
+            android:alpha="0.5"
+            android:contentDescription="Ruler"/>
 
-        <!-- Edit / Properties -->
-        <ImageButton
-            android:id="@+id/btnEdit"
-            style="@style/ToolbarBtn"
-            android:src="@drawable/ic_tune"
-            android:contentDescription="Edit properties" />
+        <Space android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1"/>
 
-        <!-- Undo -->
-        <ImageButton
-            android:id="@+id/btnUndo"
-            style="@style/ToolbarBtn"
-            android:src="@drawable/ic_undo"
-            android:contentDescription="Undo" />
+        <ImageButton android:id="@+id/btnReset" style="@style/ToolbarBtn" android:src="@drawable/ic_reset" android:contentDescription="Reset"/>
 
-        <!-- Redo -->
-        <ImageButton
-            android:id="@+id/btnRedo"
-            style="@style/ToolbarBtn"
-            android:src="@drawable/ic_redo"
-            android:contentDescription="Redo" />
-
-        <!-- Screenshot -->
-        <ImageButton
-            android:id="@+id/btnScreenshot"
-            style="@style/ToolbarBtn"
-            android:src="@drawable/ic_screenshot"
-            android:contentDescription="Screenshot" />
-
-        <!-- Spacer -->
-        <Space
-            android:layout_width="0dp"
-            android:layout_height="1dp"
-            android:layout_weight="1" />
-
-        <!-- Reset Camera -->
-        <ImageButton
-            android:id="@+id/btnReset"
-            style="@style/ToolbarBtn"
-            android:src="@drawable/ic_reset"
-            android:contentDescription="Reset camera" />
-
-        <!-- FPS counter -->
         <TextView
             android:id="@+id/tvFps"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="-- FPS"
-            android:textColor="#88FFFFFF"
-            android:textSize="11sp"
+            android:textColor="#664FC3F7"
+            android:textSize="10sp"
             android:fontFamily="monospace"
-            android:paddingStart="8dp" />
-
+            android:paddingStart="6dp"
+            android:paddingEnd="4dp"/>
     </LinearLayout>
 
-    <!-- Center hint shown before any model is loaded -->
-    <TextView
+    <!-- ══ CENTER HINT (before model loaded) ════════════════════════════════ -->
+    <LinearLayout
         android:id="@+id/tvHint"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center"
-        android:text="Tap 📂 to open a 3D model\n(OBJ · STL · GLB)"
-        android:textColor="#66FFFFFF"
-        android:textSize="16sp"
+        android:orientation="vertical"
         android:gravity="center"
-        android:lineSpacingMultiplier="1.4" />
+        android:padding="32dp"
+        android:background="#881A1A28">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📦"
+            android:textSize="48sp"
+            android:gravity="center"/>
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Tap 📂 to open a 3D model"
+            android:textColor="#CCFFFFFF"
+            android:textSize="15sp"
+            android:gravity="center"
+            android:paddingTop="8dp"/>
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="OBJ  ·  STL  ·  GLB"
+            android:textColor="#664FC3F7"
+            android:textSize="12sp"
+            android:gravity="center"
+            android:paddingTop="4dp"/>
+    </LinearLayout>
+
+    <!-- ══ RULER OVERLAY (shown when ruler active) ══════════════════════════ -->
+    <LinearLayout
+        android:id="@+id/rulerOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="12dp"
+        android:background="#EE1A1A28"
+        android:visibility="gone"
+        android:elevation="6dp">
+
+        <TextView
+            android:id="@+id/tvRulerInfo"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="📐 Tap mesh for Point 1"
+            android:textColor="#FFFFFFFF"
+            android:textSize="13sp"/>
+
+        <Button
+            android:id="@+id/btnClearRuler"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:text="Clear"
+            android:textSize="12sp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"/>
+    </LinearLayout>
+
+    <!-- ══ LOADING OVERLAY ══════════════════════════════════════════════════ -->
+    <LinearLayout
+        android:id="@+id/loadingOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:background="#CC000008"
+        android:visibility="gone"
+        android:elevation="8dp">
+
+        <ProgressBar
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:indeterminate="true"
+            android:indeterminateTint="#4FC3F7"/>
+
+        <TextView
+            android:id="@+id/tvLoading"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Loading…"
+            android:textColor="#CCFFFFFF"
+            android:textSize="14sp"
+            android:paddingTop="16dp"/>
+    </LinearLayout>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

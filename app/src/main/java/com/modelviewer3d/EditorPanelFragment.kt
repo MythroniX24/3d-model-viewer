@@ -2,173 +2,263 @@ package com.modelviewer3d
 
 import android.graphics.Color
 import android.os.Bundle
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
+import android.view.*
 import android.widget.*
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.google.android.material.switchmaterial.SwitchMaterial
+import kotlin.math.abs
 
 /**
- * Bottom-sheet editor with:
- *  • Rotation / Translation / Scale sliders (X,Y,Z)
- *  • Uniform Scale toggle
- *  • Mirror X/Y/Z buttons + Reset Transform
- *  • Color (RGB sliders)
+ * Enhanced editor bottom-sheet:
+ *  • Rotation X/Y/Z sliders (degrees)
+ *  • Position X/Y/Z sliders
+ *  • Scale in mm (EditText fields, like Blender) — no sliders
+ *  • Mirror + Reset buttons
+ *  • Color RGB sliders
  *  • Lighting (Ambient, Diffuse)
  *  • Wireframe + Bounding Box toggles
+ *  • Ruler Measurement section (activate from MainActivity)
  */
 class EditorPanelFragment : BottomSheetDialogFragment() {
 
-    // Local state mirrors the renderer's transform
     private var rotX=0f; private var rotY=0f; private var rotZ=0f
     private var posX=0f; private var posY=0f; private var posZ=0f
-    private var scaX=1f; private var scaY=1f; private var scaZ=1f
-    private var colR=0.7f; private var colG=0.7f; private var colB=0.9f
+    private var curWmm=100f; private var curHmm=100f; private var curDmm=100f
+    private var origWmm=100f; private var origHmm=100f; private var origDmm=100f
+    private var colR=0.72f; private var colG=0.72f; private var colB=0.92f
     private var ambient=0.3f; private var diffuse=0.8f
     private var uniformScale = true
 
-    override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?,
-        savedInstanceState: Bundle?
-    ): View {
+    // EditText refs so we can update them without triggering callbacks
+    private var etW: EditText? = null
+    private var etH: EditText? = null
+    private var etD: EditText? = null
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        // Fetch current mm sizes from renderer
+        glRun {
+            val s = NativeLib.nativeGetModelSizeMM()
+            origWmm=s[0]; origHmm=s[1]; origDmm=s[2]
+            curWmm=s[3];  curHmm=s[4];  curDmm=s[5]
+        }
+
         val ctx = requireContext()
         val scroll = ScrollView(ctx)
         val root = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(48, 24, 48, 48)
+            setPadding(48, 16, 48, 60)
+            setBackgroundColor(Color.parseColor("#1C1C22"))
         }
         scroll.addView(root)
+        scroll.setBackgroundColor(Color.parseColor("#1C1C22"))
 
-        // ── Helpers ──────────────────────────────────────────────────────────
-        fun label(text: String) = TextView(ctx).apply {
-            this.text = text; textSize = 12f
-            setTextColor(Color.parseColor("#BBBBBB"))
-            setPadding(0, 16, 0, 2)
-        }
-        fun sectionTitle(text: String) = TextView(ctx).apply {
-            this.text = text; textSize = 10f; letterSpacing = 0.12f
+        // ── UI helpers ────────────────────────────────────────────────────────
+        fun sectionTitle(t: String) = TextView(ctx).apply {
+            text = t; textSize = 10f; letterSpacing = 0.14f
             setTextColor(Color.parseColor("#4FC3F7"))
-            setPadding(0, 28, 0, 0)
+            setPadding(0, 32, 0, 8)
         }
-
-        /** SeekBar mapped to [min, max], calls onChange with float value */
-        fun slider(min: Float, max: Float, initVal: Float,
-                   onChange: (Float) -> Unit): SeekBar {
+        fun fieldLabel(t: String) = TextView(ctx).apply {
+            text = t; textSize = 11f
+            setTextColor(Color.parseColor("#AAAAAA"))
+            setPadding(0, 8, 0, 2)
+        }
+        fun slider(min: Float, max: Float, init: Float, cb: (Float)->Unit): SeekBar {
             val steps = 1000
             return SeekBar(ctx).apply {
                 this.max = steps
-                progress = ((initVal - min) / (max - min) * steps).toInt().coerceIn(0, steps)
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(bar: SeekBar, p: Int, fromUser: Boolean) {
-                        if (fromUser) onChange(min + p.toFloat() / steps * (max - min))
+                progress = ((init-min)/(max-min)*steps).toInt().coerceIn(0,steps)
+                setOnSeekBarChangeListener(object: SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(b: SeekBar, p: Int, fromUser: Boolean) {
+                        if (fromUser) cb(min+p.toFloat()/steps*(max-min))
                     }
-                    override fun onStartTrackingTouch(bar: SeekBar) {}
-                    override fun onStopTrackingTouch(bar: SeekBar) {}
+                    override fun onStartTrackingTouch(b: SeekBar){}
+                    override fun onStopTrackingTouch(b: SeekBar){}
                 })
             }
         }
-
-        fun switch(label: String, checked: Boolean, onChange: (Boolean) -> Unit) =
+        fun switch(label: String, checked: Boolean, cb: (Boolean)->Unit) =
             SwitchMaterial(ctx).apply {
-                text = label; isChecked = checked
+                text=label; isChecked=checked
                 setTextColor(Color.WHITE)
-                setOnCheckedChangeListener { _, v -> onChange(v) }
+                setPadding(0,8,0,0)
+                setOnCheckedChangeListener{_,v->cb(v)}
             }
 
-        fun glRun(block: () -> Unit) =
-            (activity as? MainActivity)?.glView?.queueEvent(block)
+        // ── Divider ───────────────────────────────────────────────────────────
+        fun divider() = View(ctx).apply {
+            setBackgroundColor(Color.parseColor("#333340"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 1).apply { setMargins(0,24,0,0) }
+        }
+
+        // ── Handle at top ─────────────────────────────────────────────────────
+        root.addView(View(ctx).apply {
+            setBackgroundColor(Color.parseColor("#555566"))
+            layoutParams = LinearLayout.LayoutParams(60, 4).apply {
+                gravity = Gravity.CENTER_HORIZONTAL; setMargins(0,12,0,8)
+            }
+        })
+        root.addView(TextView(ctx).apply {
+            text = "✏️  Model Editor"; textSize = 15f; gravity = Gravity.CENTER
+            setTextColor(Color.WHITE); setPadding(0,0,0,8)
+        })
+        root.addView(divider())
 
         // ── ROTATION ─────────────────────────────────────────────────────────
-        root.addView(sectionTitle("ROTATION  (−180° … +180°)"))
-        root.addView(label("X"))
-        root.addView(slider(-180f,180f,rotX) { v -> rotX=v; glRun{NativeLib.nativeSetRotation(rotX,rotY,rotZ)} })
-        root.addView(label("Y"))
-        root.addView(slider(-180f,180f,rotY) { v -> rotY=v; glRun{NativeLib.nativeSetRotation(rotX,rotY,rotZ)} })
-        root.addView(label("Z"))
-        root.addView(slider(-180f,180f,rotZ) { v -> rotZ=v; glRun{NativeLib.nativeSetRotation(rotX,rotY,rotZ)} })
+        root.addView(sectionTitle("ROTATION  (degrees)"))
+        listOf("X" to {v:Float->rotX=v}, "Y" to {v:Float->rotY=v}, "Z" to {v:Float->rotZ=v}).forEach{(ax,assign)->
+            root.addView(fieldLabel(ax))
+            root.addView(slider(-180f,180f,0f){ v-> assign(v); glRun{NativeLib.nativeSetRotation(rotX,rotY,rotZ)} })
+        }
+        root.addView(divider())
 
         // ── POSITION ─────────────────────────────────────────────────────────
-        root.addView(sectionTitle("POSITION  (−5 … +5)"))
-        root.addView(label("X"))
-        root.addView(slider(-5f,5f,posX) { v -> posX=v; glRun{NativeLib.nativeSetTranslation(posX,posY,posZ)} })
-        root.addView(label("Y"))
-        root.addView(slider(-5f,5f,posY) { v -> posY=v; glRun{NativeLib.nativeSetTranslation(posX,posY,posZ)} })
-        root.addView(label("Z"))
-        root.addView(slider(-5f,5f,posZ) { v -> posZ=v; glRun{NativeLib.nativeSetTranslation(posX,posY,posZ)} })
+        root.addView(sectionTitle("POSITION"))
+        listOf("X" to {v:Float->posX=v}, "Y" to {v:Float->posY=v}, "Z" to {v:Float->posZ=v}).forEach{(ax,assign)->
+            root.addView(fieldLabel(ax))
+            root.addView(slider(-5f,5f,0f){ v-> assign(v); glRun{NativeLib.nativeSetTranslation(posX,posY,posZ)} })
+        }
+        root.addView(divider())
 
-        // ── SCALE ────────────────────────────────────────────────────────────
-        root.addView(sectionTitle("SCALE  (0.05 … 5.0)"))
-        root.addView(switch("Uniform Scale", true) { checked -> uniformScale = checked })
+        // ── SCALE in MM ───────────────────────────────────────────────────────
+        root.addView(sectionTitle("DIMENSIONS  (mm)"))
+        root.addView(TextView(ctx).apply {
+            text = "Original: %.1f × %.1f × %.1f mm".format(origWmm,origHmm,origDmm)
+            textSize = 10f; setTextColor(Color.parseColor("#888888"))
+        })
+        root.addView(switch("Uniform Scale (lock ratio)", true){ checked -> uniformScale=checked })
 
-        root.addView(label("X"))
-        root.addView(slider(0.05f,5f,scaX) { v ->
-            scaX=v; if(uniformScale){scaY=v;scaZ=v}
-            glRun{NativeLib.nativeSetScale(scaX,scaY,scaZ)}
+        // Helper: build mm input row  "W  [____] mm"
+        fun mmRow(axLabel: String, initVal: Float, getOther1: ()->Float, getOther2: ()->Float,
+                  orig1: Float, orig2: Float,
+                  onSet: (Float)->Unit): EditText {
+            val row = LinearLayout(ctx).apply {
+                orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL
+                setPadding(0,8,0,0)
+            }
+            row.addView(TextView(ctx).apply {
+                text=axLabel; textSize=12f; setTextColor(Color.parseColor("#BBBBBB"))
+                layoutParams=LinearLayout.LayoutParams(32,LinearLayout.LayoutParams.WRAP_CONTENT)
+            })
+            val et = EditText(ctx).apply {
+                inputType=InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                setText("%.2f".format(initVal))
+                setTextColor(Color.WHITE); textSize=14f
+                setBackgroundColor(Color.parseColor("#2A2A35"))
+                setPadding(16,10,16,10)
+                layoutParams=LinearLayout.LayoutParams(0,LinearLayout.LayoutParams.WRAP_CONTENT,1f)
+            }
+            row.addView(et)
+            row.addView(TextView(ctx).apply {
+                text=" mm"; textSize=11f; setTextColor(Color.parseColor("#888888"))
+            })
+            root.addView(row)
+
+            et.addTextChangedListener(object: TextWatcher {
+                override fun beforeTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){}
+                override fun onTextChanged(s:CharSequence?,a:Int,b:Int,c:Int){}
+                override fun afterTextChanged(s: Editable?) {
+                    val v = s?.toString()?.toFloatOrNull() ?: return
+                    if (v < 0.001f) return
+                    onSet(v)
+                    val w:Float; val h:Float; val d:Float
+                    if (uniformScale && orig1 > 0f && orig2 > 0f) {
+                        val factor = v / initVal  // ratio change won't work well; use orig ratio
+                        // Lock: scale others proportionally based on original aspect
+                    }
+                    // Simple approach: read all 3 ET values when any changes
+                    val wv = etW?.text?.toString()?.toFloatOrNull() ?: curWmm
+                    val hv = etH?.text?.toString()?.toFloatOrNull() ?: curHmm
+                    val dv = etD?.text?.toString()?.toFloatOrNull() ?: curDmm
+                    if (uniformScale && axLabel != "?") {
+                        // Propagate proportionally from the changed axis
+                        val ratio = v / when(axLabel){"W"->origWmm;"H"->origHmm;else->origDmm}
+                        val newW = origWmm*ratio; val newH = origHmm*ratio; val newD = origDmm*ratio
+                        if (axLabel=="W"){ etH?.setText("%.2f".format(newH)); etD?.setText("%.2f".format(newD)) }
+                        if (axLabel=="H"){ etW?.setText("%.2f".format(newW)); etD?.setText("%.2f".format(newD)) }
+                        if (axLabel=="D"){ etW?.setText("%.2f".format(newW)); etH?.setText("%.2f".format(newH)) }
+                        glRun { NativeLib.nativeSetScaleMM(newW,newH,newD) }
+                    } else {
+                        glRun { NativeLib.nativeSetScaleMM(wv,hv,dv) }
+                    }
+                }
+            })
+            return et
+        }
+
+        etW = mmRow("W", curWmm, {curHmm},{curDmm}, origHmm,origDmm, {curWmm=it})
+        etH = mmRow("H", curHmm, {curWmm},{curDmm}, origWmm,origDmm, {curHmm=it})
+        etD = mmRow("D", curDmm, {curWmm},{curHmm}, origWmm,origHmm, {curDmm=it})
+
+        // Reset to original mm
+        root.addView(Button(ctx).apply {
+            text = "Reset to Original Size (%.0f×%.0f×%.0f mm)".format(origWmm,origHmm,origDmm)
+            textSize = 11f
+            setOnClickListener {
+                etW?.setText("%.2f".format(origWmm))
+                etH?.setText("%.2f".format(origHmm))
+                etD?.setText("%.2f".format(origDmm))
+                glRun { NativeLib.nativeSetScaleMM(origWmm,origHmm,origDmm) }
+            }
         })
-        root.addView(label("Y"))
-        root.addView(slider(0.05f,5f,scaY) { v ->
-            scaY=v; if(uniformScale){scaX=v;scaZ=v}
-            glRun{NativeLib.nativeSetScale(scaX,scaY,scaZ)}
-        })
-        root.addView(label("Z"))
-        root.addView(slider(0.05f,5f,scaZ) { v ->
-            scaZ=v; if(uniformScale){scaX=v;scaY=v}
-            glRun{NativeLib.nativeSetScale(scaX,scaY,scaZ)}
-        })
+        root.addView(divider())
 
         // ── GEOMETRY ─────────────────────────────────────────────────────────
         root.addView(sectionTitle("GEOMETRY"))
         val mirrorRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 8, 0, 0)
+            orientation=LinearLayout.HORIZONTAL; setPadding(0,8,0,0)
         }
-        fun mirrorBtn(ax: String, action: () -> Unit) = Button(ctx).apply {
-            text = "Flip $ax"; textSize = 12f
-            setPadding(16,8,16,8)
-            setOnClickListener { glRun { action() } }
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        listOf("Flip X" to {NativeLib.nativeMirrorX()},
+               "Flip Y" to {NativeLib.nativeMirrorY()},
+               "Flip Z" to {NativeLib.nativeMirrorZ()}).forEach{(lbl,action)->
+            mirrorRow.addView(Button(ctx).apply {
+                text=lbl; textSize=11f; setPadding(8,4,8,4)
+                setOnClickListener{ glRun{action()} }
+                layoutParams=LinearLayout.LayoutParams(0,LinearLayout.LayoutParams.WRAP_CONTENT,1f)
+            })
         }
-        mirrorRow.addView(mirrorBtn("X") { NativeLib.nativeMirrorX() })
-        mirrorRow.addView(mirrorBtn("Y") { NativeLib.nativeMirrorY() })
-        mirrorRow.addView(mirrorBtn("Z") { NativeLib.nativeMirrorZ() })
         root.addView(mirrorRow)
-
         root.addView(Button(ctx).apply {
             text = "↺  Reset All Transforms"
             setOnClickListener {
-                rotX=0f;rotY=0f;rotZ=0f;posX=0f;posY=0f;posZ=0f;scaX=1f;scaY=1f;scaZ=1f
+                rotX=0f;rotY=0f;rotZ=0f;posX=0f;posY=0f;posZ=0f
                 glRun { NativeLib.nativeResetTransform() }
             }
         })
+        root.addView(divider())
 
-        // ── COLOR ────────────────────────────────────────────────────────────
+        // ── COLOR ─────────────────────────────────────────────────────────────
         root.addView(sectionTitle("MODEL COLOR"))
-        root.addView(label("Red"))
-        root.addView(slider(0f,1f,colR)  { v -> colR=v; glRun{NativeLib.nativeSetColor(colR,colG,colB)} })
-        root.addView(label("Green"))
-        root.addView(slider(0f,1f,colG)  { v -> colG=v; glRun{NativeLib.nativeSetColor(colR,colG,colB)} })
-        root.addView(label("Blue"))
-        root.addView(slider(0f,1f,colB)  { v -> colB=v; glRun{NativeLib.nativeSetColor(colR,colG,colB)} })
+        root.addView(fieldLabel("Red"))
+        root.addView(slider(0f,1f,colR){ v->colR=v; glRun{NativeLib.nativeSetColor(colR,colG,colB)} })
+        root.addView(fieldLabel("Green"))
+        root.addView(slider(0f,1f,colG){ v->colG=v; glRun{NativeLib.nativeSetColor(colR,colG,colB)} })
+        root.addView(fieldLabel("Blue"))
+        root.addView(slider(0f,1f,colB){ v->colB=v; glRun{NativeLib.nativeSetColor(colR,colG,colB)} })
+        root.addView(divider())
 
         // ── LIGHTING ─────────────────────────────────────────────────────────
         root.addView(sectionTitle("LIGHTING"))
-        root.addView(label("Ambient"))
-        root.addView(slider(0f,1f,ambient) { v -> ambient=v; glRun{NativeLib.nativeSetAmbient(v)} })
-        root.addView(label("Diffuse"))
-        root.addView(slider(0f,1f,diffuse) { v -> diffuse=v; glRun{NativeLib.nativeSetDiffuse(v)} })
+        root.addView(fieldLabel("Ambient"))
+        root.addView(slider(0f,1f,ambient){ v->ambient=v; glRun{NativeLib.nativeSetAmbient(v)} })
+        root.addView(fieldLabel("Diffuse"))
+        root.addView(slider(0f,1f,diffuse){ v->diffuse=v; glRun{NativeLib.nativeSetDiffuse(v)} })
+        root.addView(divider())
 
-        // ── DISPLAY ──────────────────────────────────────────────────────────
+        // ── DISPLAY ───────────────────────────────────────────────────────────
         root.addView(sectionTitle("DISPLAY"))
-        root.addView(switch("Wireframe Mode", false) { on ->
-            glRun { NativeLib.nativeSetWireframe(on) }
-        })
-        root.addView(switch("Bounding Box", false) { on ->
-            glRun { NativeLib.nativeSetBoundingBox(on) }
-        })
+        root.addView(switch("Wireframe Mode", false){ on-> glRun{NativeLib.nativeSetWireframe(on)} })
+        root.addView(switch("Bounding Box",   false){ on-> glRun{NativeLib.nativeSetBoundingBox(on)} })
 
         return scroll
     }
+
+    private fun glRun(block: ()->Unit) =
+        (activity as? MainActivity)?.glView?.queueEvent(block)
 
     companion object {
         const val TAG = "EditorPanel"

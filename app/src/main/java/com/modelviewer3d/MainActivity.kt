@@ -234,20 +234,54 @@ class MainActivity : AppCompatActivity() {
             try {
                 val name = resolveFileName(uri) ?: "model.obj"
                 val dest = File(cacheDir, name)
-                contentResolver.openInputStream(uri)?.use { FileOutputStream(dest).use { o -> it.copyTo(o) } }
-                withContext(Dispatchers.Main) { tvHint?.visibility=View.GONE; showLoading("Loading $name…") }
-                var ok=false; val latch=CountDownLatch(1)
+
+                // Copy URI → local cache file
+                contentResolver.openInputStream(uri)?.use { inp ->
+                    FileOutputStream(dest).use { out -> inp.copyTo(out) }
+                }
+
+                withContext(Dispatchers.Main) {
+                    tvHint?.visibility = View.GONE
+                    showLoading("Parsing $name…")
+                }
+
+                // ── Step 1: Parse on IO thread (heavy CPU work, no GL needed) ──
+                val parseOk = try {
+                    NativeLib.nativeParseModel(dest.absolutePath)
+                } catch (e: Exception) {
+                    false
+                }
+
+                if (!parseOk) {
+                    withContext(Dispatchers.Main) {
+                        hideLoading()
+                        toast("Failed to parse $name — unsupported format?")
+                    }
+                    return@launch
+                }
+
+                withContext(Dispatchers.Main) { showLoading("Uploading to GPU…") }
+
+                // ── Step 2: Upload on GL thread (fast — just buffer uploads) ──
+                var uploadOk = false
+                val latch = java.util.concurrent.CountDownLatch(1)
                 glView.queueEvent {
-                    try { ok=NativeLib.nativeLoadModel(dest.absolutePath) } catch(_:Exception){}
+                    try { uploadOk = NativeLib.nativeUploadParsed() }
+                    catch (e: Exception) { uploadOk = false }
                     latch.countDown()
                 }
-                latch.await()
+                latch.await()   // safe — we're on IO thread, not main thread
+
                 withContext(Dispatchers.Main) {
                     hideLoading()
-                    toast(if(ok) "✓ $name loaded" else "Failed to load $name")
+                    toast(if (uploadOk) "✓ $name loaded" else "GPU upload failed")
                 }
+
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { hideLoading(); toast("Error: ${e.message}") }
+                withContext(Dispatchers.Main) {
+                    hideLoading()
+                    toast("Error: ${e.message}")
+                }
             }
         }
     }

@@ -39,7 +39,10 @@ public:
     void draw();
     void resize(int width, int height);
 
-    bool loadModel(const std::string& path);
+    // TWO-STEP LOAD: parse on any thread, upload on GL thread only
+    bool parseModel(const std::string& path);   // Step 1 — call from IO thread
+    bool uploadParsed();                         // Step 2 — call from GL thread
+    bool loadModel(const std::string& path);     // Legacy: parse+upload (GL thread only)
 
     // Camera
     void touchRotate(float dx, float dy);
@@ -112,6 +115,9 @@ private:
     float m_rotX=0,m_rotY=0,m_rotZ=0;
     float m_posX=0,m_posY=0,m_posZ=0;
     float m_scaX=1,m_scaY=1,m_scaZ=1;
+
+    // Pending parsed data (set by parseModel, consumed by uploadParsed)
+    ModelData* m_pendingData = nullptr;   // raw pointer, owned by renderer
 
     // Original size in mm
     float m_origWmm=1,m_origHmm=1,m_origDmm=1;

@@ -22,6 +22,16 @@ JNIEXPORT void JNICALL Java_com_modelviewer3d_NativeLib_nativeResize(JNIEnv*,jcl
 JNIEXPORT void JNICALL Java_com_modelviewer3d_NativeLib_nativeDraw(JNIEnv*,jclass){ if(g_renderer) g_renderer->draw(); }
 JNIEXPORT void JNICALL Java_com_modelviewer3d_NativeLib_nativeDestroy(JNIEnv*,jclass){ g_renderer.reset(); }
 
+// TWO-STEP LOAD — parse on IO thread, upload on GL thread
+JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeParseModel(JNIEnv* env,jclass,jstring path){
+    if(!g_renderer) return JNI_FALSE;
+    return g_renderer->parseModel(jstr(env,path))?JNI_TRUE:JNI_FALSE;
+}
+JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeUploadParsed(JNIEnv*,jclass){
+    if(!g_renderer) return JNI_FALSE;
+    return g_renderer->uploadParsed()?JNI_TRUE:JNI_FALSE;
+}
+
 JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeLoadModel(JNIEnv* env,jclass,jstring path){
     if(!g_renderer) return JNI_FALSE;
     return g_renderer->loadModel(jstr(env,path))?JNI_TRUE:JNI_FALSE;

@@ -72,6 +72,7 @@ static int64_t nowNs(){
 // ── Ctor/Dtor ────────────────────────────────────────────────────────────────
 Renderer::Renderer()=default;
 Renderer::~Renderer(){
+    delete m_pendingData;
     for(auto& mo:m_meshes){
         if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
         if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
@@ -394,6 +395,44 @@ void Renderer::setAmbient(float a){m_ambient=std::clamp(a,0.0f,1.0f);}
 void Renderer::setDiffuse(float d){m_diffuse=std::clamp(d,0.0f,1.0f);}
 void Renderer::setWireframe(bool on){m_wireframe=on;}
 void Renderer::setShowBoundingBox(bool on){m_showBBox=on;}
+
+// ── TWO-STEP LOAD ─────────────────────────────────────────────────────────────
+// Step 1: Call from IO/background thread — heavy CPU parsing, NO OpenGL calls
+bool Renderer::parseModel(const std::string& path){
+    delete m_pendingData;
+    m_pendingData = nullptr;
+    ModelData* md = new ModelData();
+    if(!ModelLoader::load(path, *md)){
+        delete md;
+        LOGE("parseModel failed: %s", path.c_str());
+        return false;
+    }
+    m_pendingData = md;
+    LOGI("parseModel OK — %zu verts, %zu idx, %.1fx%.1fx%.1f mm",
+         md->vertices.size(), md->indices.size(),
+         md->widthMM(), md->heightMM(), md->depthMM());
+    return true;
+}
+
+// Step 2: Call from GL thread — GPU upload only, fast
+bool Renderer::uploadParsed(){
+    if(!m_pendingData){
+        LOGE("uploadParsed: no pending data");
+        return false;
+    }
+    m_origWmm = m_pendingData->widthMM();
+    m_origHmm = m_pendingData->heightMM();
+    m_origDmm = m_pendingData->depthMM();
+    m_normalizeScale = m_pendingData->normalizeScale;
+    separateIntoMeshes(*m_pendingData);
+    delete m_pendingData;
+    m_pendingData = nullptr;
+    m_hasModel    = !m_meshes.empty();
+    m_selectedMesh = -1;
+    resetTransform(); resetCamera(); clearRuler();
+    LOGI("uploadParsed OK — %d mesh(es)", (int)m_meshes.size());
+    return m_hasModel;
+}
 
 // ── Load model ───────────────────────────────────────────────────────────────
 bool Renderer::loadModel(const std::string& path){

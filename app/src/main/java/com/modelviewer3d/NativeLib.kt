@@ -5,7 +5,10 @@ object NativeLib {
     external fun nativeResize(width: Int, height: Int)
     external fun nativeDraw()
     external fun nativeDestroy()
-    external fun nativeLoadModel(path: String): Boolean
+    // TWO-STEP LOAD (preferred — avoids freezing GL thread)
+    external fun nativeParseModel(path: String): Boolean   // call on IO thread
+    external fun nativeUploadParsed(): Boolean              // call on GL thread
+    external fun nativeLoadModel(path: String): Boolean    // legacy
     external fun nativeTouchRotate(dx: Float, dy: Float)
     external fun nativeTouchZoom(factor: Float)
     external fun nativeTouchPan(dx: Float, dy: Float)

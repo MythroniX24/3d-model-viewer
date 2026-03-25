@@ -1,17 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Extend Material theme — needed for BottomSheetDialogFragment -->
     <style name="Theme.ModelViewer3D" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">#1E1E22</item>
-        <item name="colorPrimaryVariant">#2C2C33</item>
+        <item name="colorPrimary">#1E1E26</item>
+        <item name="colorPrimaryVariant">#2C2C38</item>
         <item name="colorOnPrimary">#FFFFFF</item>
         <item name="colorSecondary">#4FC3F7</item>
         <item name="colorOnSecondary">#000000</item>
-        <item name="colorSurface">#2C2C33</item>
+        <item name="colorSurface">#1C1C24</item>
         <item name="colorOnSurface">#FFFFFF</item>
-        <item name="android:colorBackground">#1E1E22</item>
-        <item name="android:statusBarColor">#1A1A1F</item>
-        <item name="android:navigationBarColor">#1A1A1F</item>
+        <item name="android:colorBackground">#1A1A20</item>
+        <item name="android:statusBarColor">#1A1A20</item>
+        <item name="android:navigationBarColor">#1A1A20</item>
         <item name="android:windowLightStatusBar">false</item>
+        <!-- Bottom sheet background -->
+        <item name="bottomSheetDialogTheme">@style/BottomSheetStyle</item>
+    </style>
+
+    <style name="BottomSheetStyle" parent="Theme.Design.Light.BottomSheetDialog">
+        <item name="android:windowIsFloating">false</item>
+        <item name="bottomSheetStyle">@style/BottomSheetShapeStyle</item>
+    </style>
+
+    <style name="BottomSheetShapeStyle" parent="Widget.Design.BottomSheet.Modal">
+        <item name="android:background">@android:color/transparent</item>
     </style>
 
     <!-- Toolbar icon button style -->

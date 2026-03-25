@@ -49,8 +49,6 @@ private:
     static bool loadOBJ(const std::string& path, ModelData& data);
     static bool loadSTL(const std::string& path, ModelData& data);
     static bool loadGLB(const std::string& path, ModelData& data);
-    static bool loadGLTF(const std::string& path, ModelData& data);
-    static bool loadTinyGLTF(const std::string& path, ModelData& data, bool binary);
     static void generateFlatNormals(ModelData& data);
     static void normalizeModel(ModelData& data);
 };

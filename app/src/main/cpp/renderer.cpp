@@ -92,7 +92,9 @@ bool Renderer::init(int w,int h){
     glViewport(0,0,w,h);
     glClearColor(0.09f,0.09f,0.12f,1.0f);
     glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL);
-    glEnable(GL_CULL_FACE);  glCullFace(GL_BACK);
+    // STL files often have inconsistent winding; disabling face culling keeps
+    // valid meshes visible instead of discarding all back-facing triangles.
+    glDisable(GL_CULL_FACE);
 
     buildShaders();
 

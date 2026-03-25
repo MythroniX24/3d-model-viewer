@@ -27,6 +27,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity() {
@@ -41,9 +42,6 @@ class MainActivity : AppCompatActivity() {
     private var rulerOverlay:   View?        = null
     private var tvRulerInfo:    TextView?    = null
     private var btnRuler:       ImageButton? = null
-
-    // Track last loaded file so we can re-upload after GL context loss
-    private var lastLoadedFilePath: String? = null
 
     private var rulerPoint1: FloatArray? = null
     private var rulerPoint2: FloatArray? = null
@@ -74,14 +72,6 @@ class MainActivity : AppCompatActivity() {
             renderer = ModelRenderer()
             renderer.onFpsUpdate = { fps ->
                 runOnUiThread { tvFps?.text = "%.0f".format(fps) }
-            }
-            renderer.onContextLost = {
-                // GL context was recreated (e.g. app came back from background)
-                // Re-upload the last model if we have one
-                val path = lastLoadedFilePath
-                if (path != null) {
-                    reloadModelFromPath(path)
-                }
             }
             glView.attachRenderer(renderer)
             glView.onRulerPick = { pt -> onRulerPointPicked(pt) }
@@ -142,7 +132,7 @@ class MainActivity : AppCompatActivity() {
                         catch(_:Exception){}
                         latch.countDown()
                     }
-                    withContext(Dispatchers.IO) { latch.await() }
+                    withContext(Dispatchers.IO) { latch.await(5, TimeUnit.SECONDS) }
                     val distMM = distW * (if (maxMM>0.001f) maxMM/2f else 1f)
                     withContext(Dispatchers.Main) {
                         tvRulerInfo?.text = "📏 %.2f mm  (%.2f cm)".format(distMM, distMM/10f)
@@ -197,9 +187,9 @@ class MainActivity : AppCompatActivity() {
                             else  -> false
                         }
                     } catch (_: Exception) {}
-                    latch.countDown()
+                    finally { latch.countDown() }
                 }
-                latch.await()
+                latch.await(30, TimeUnit.SECONDS)
 
                 withContext(Dispatchers.Main) {
                     if (!ok) { toast("Export failed"); return@withContext }
@@ -249,9 +239,7 @@ class MainActivity : AppCompatActivity() {
                 // Copy URI → local cache file
                 val inputStream = contentResolver.openInputStream(uri)
                 if (inputStream == null) {
-                    withContext(Dispatchers.Main) {
-                        toast("Cannot open file — permission denied?")
-                    }
+                    withContext(Dispatchers.Main) { toast("Cannot open file — permission denied?") }
                     return@launch
                 }
                 inputStream.use { inp ->
@@ -263,7 +251,9 @@ class MainActivity : AppCompatActivity() {
                     showLoading("Parsing $name…")
                 }
 
-                // ── Step 1: Parse on IO thread (heavy CPU work, no GL needed) ──
+                // ── Step 1: Parse + mesh separation on IO thread ──────────────
+                // Heavy CPU work happens HERE, not on the GL thread.
+                // This means GL thread stays responsive and the upload step is fast.
                 val parseOk = try {
                     NativeLib.nativeParseModel(dest.absolutePath)
                 } catch (e: Exception) {
@@ -280,26 +270,24 @@ class MainActivity : AppCompatActivity() {
 
                 withContext(Dispatchers.Main) { showLoading("Uploading to GPU…") }
 
-                // ── Step 2: Upload on GL thread (fast — just buffer uploads) ──
-                // Use timeout to prevent infinite hang if GL thread is paused/unavailable
+                // ── Step 2: Fast GPU buffer upload on GL thread ───────────────
+                // uploadParsed only does glGen/glBuffer calls — typically < 50ms
+                // even for large models, so 30s timeout is more than enough.
                 var uploadOk = false
-                val latch = java.util.concurrent.CountDownLatch(1)
+                val latch = CountDownLatch(1)
                 glView.queueEvent {
                     try { uploadOk = NativeLib.nativeUploadParsed() }
                     catch (e: Exception) { uploadOk = false }
-                    finally { latch.countDown() }  // always release, even on exception
+                    finally { latch.countDown() }  // always released, even on exception
                 }
-                // Wait max 10 seconds — avoids infinite loading spinner
-                val completed = latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+
+                val completed = latch.await(30, TimeUnit.SECONDS)
 
                 withContext(Dispatchers.Main) {
                     hideLoading()
                     when {
-                        !completed -> toast("GPU upload timed out — please try again")
-                        uploadOk   -> {
-                            lastLoadedFilePath = dest.absolutePath
-                            toast("✓ $name loaded")
-                        }
+                        !completed -> toast("Upload timed out — please try again")
+                        uploadOk   -> toast("✓ $name loaded")
                         else       -> toast("GPU upload failed")
                     }
                 }
@@ -310,21 +298,6 @@ class MainActivity : AppCompatActivity() {
                     toast("Error: ${e.message}")
                 }
             }
-        }
-    }
-    // Re-upload a previously cached model file after GL context loss
-    private fun reloadModelFromPath(path: String) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val parseOk = try { NativeLib.nativeParseModel(path) } catch (e: Exception) { false }
-            if (!parseOk) return@launch
-            val latch = java.util.concurrent.CountDownLatch(1)
-            var uploadOk = false
-            glView.queueEvent {
-                try { uploadOk = NativeLib.nativeUploadParsed() }
-                catch (e: Exception) { uploadOk = false }
-                finally { latch.countDown() }
-            }
-            latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
         }
     }
 
@@ -357,7 +330,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             var rgba: ByteArray?=null; val latch=CountDownLatch(1)
             glView.queueEvent { try{rgba=NativeLib.nativeTakeScreenshot()}catch(_:Exception){}; latch.countDown() }
-            withContext(Dispatchers.IO) { latch.await() }
+            withContext(Dispatchers.IO) { latch.await(10, TimeUnit.SECONDS) }
             val bytes=rgba ?: run { toast("Screenshot failed"); return@launch }
             val bmp=withContext(Dispatchers.Default){
                 val argb=IntArray(capW*capH)

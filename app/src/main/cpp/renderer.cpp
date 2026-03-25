@@ -36,7 +36,7 @@ in vec3 vFragPos, vNormal;
 out vec4 fragColor;
 uniform vec3  uColor, uLightDir;
 uniform float uAmbient, uDiffuse;
-uniform int   uSelected;  // highlight selected mesh
+uniform int   uSelected;
 void main(){
     vec3 n   = normalize(vNormal);
     float d  = max(dot(n,-uLightDir),0.0);
@@ -44,7 +44,7 @@ void main(){
     vec3 rd  = reflect(uLightDir,n);
     float sp = pow(max(dot(vd,rd),0.0),32.0)*0.25;
     vec3 c   = (uAmbient + uDiffuse*d)*uColor + sp;
-    if(uSelected==1) c = mix(c, vec3(0.2,0.8,1.0), 0.35); // cyan tint
+    if(uSelected==1) c = mix(c, vec3(0.2,0.8,1.0), 0.35);
     fragColor = vec4(clamp(c,0.0,1.0),1.0);
 })";
 
@@ -72,7 +72,6 @@ static int64_t nowNs(){
 // ── Ctor/Dtor ────────────────────────────────────────────────────────────────
 Renderer::Renderer()=default;
 Renderer::~Renderer(){
-    delete m_pendingData;
     for(auto& mo:m_meshes){
         if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
         if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
@@ -87,7 +86,7 @@ Renderer::~Renderer(){
     if(m_wireProg) glDeleteProgram(m_wireProg);
 }
 
-// ── Init ────────────────────────────────────────────────────────────────────
+// ── Init ─────────────────────────────────────────────────────────────────────
 bool Renderer::init(int w,int h){
     m_width=w; m_height=h;
     glViewport(0,0,w,h);
@@ -97,11 +96,16 @@ bool Renderer::init(int w,int h){
 
     buildShaders();
 
-    // Bounding box
+    // Safely recreate bounding-box GPU objects (delete stale handles first)
+    if(m_bbVao)    { glDeleteVertexArrays(1,&m_bbVao);   m_bbVao=0; }
+    if(m_bbVbo)    { glDeleteBuffers(1,&m_bbVbo);         m_bbVbo=0; }
+    if(m_bbIbo)    { glDeleteBuffers(1,&m_bbIbo);         m_bbIbo=0; }
+    if(m_rulerVao) { glDeleteVertexArrays(1,&m_rulerVao); m_rulerVao=0; }
+    if(m_rulerVbo) { glDeleteBuffers(1,&m_rulerVbo);      m_rulerVbo=0; }
+
     glGenVertexArrays(1,&m_bbVao); glGenBuffers(1,&m_bbVbo); glGenBuffers(1,&m_bbIbo);
     buildBoundingBox();
 
-    // Ruler VAO
     glGenVertexArrays(1,&m_rulerVao); glGenBuffers(1,&m_rulerVbo);
     glBindVertexArray(m_rulerVao);
     glBindBuffer(GL_ARRAY_BUFFER,m_rulerVbo);
@@ -110,6 +114,10 @@ bool Renderer::init(int w,int h){
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,12,nullptr);
     glBindVertexArray(0);
+
+    // Re-upload any existing meshes (GL context was recreated — old handles invalid)
+    // Vertex data is still in RAM inside each MeshObject, so we can re-upload cheaply.
+    reuploadAllMeshes();
 
     m_fpsTimerNs=nowNs();
     return !checkGLError("init");
@@ -141,7 +149,8 @@ void Renderer::buildBoundingBox(){
 
 // ── Upload single MeshObject to GPU ──────────────────────────────────────────
 void Renderer::uploadMeshObject(MeshObject& mo){
-    if(!mo.vao){ glGenVertexArrays(1,&mo.vao); glGenBuffers(1,&mo.vbo); glGenBuffers(1,&mo.ibo); }
+    // Always generate fresh handles (stale handles must be cleared before calling)
+    glGenVertexArrays(1,&mo.vao); glGenBuffers(1,&mo.vbo); glGenBuffers(1,&mo.ibo);
     glBindVertexArray(mo.vao);
     glBindBuffer(GL_ARRAY_BUFFER,mo.vbo);
     glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)(mo.vertices.size()*sizeof(Vertex)),mo.vertices.data(),GL_STATIC_DRAW);
@@ -155,23 +164,34 @@ void Renderer::uploadMeshObject(MeshObject& mo){
     mo.gpuReady=true;
 }
 
-// ── Mesh Separation (Union-Find on shared edges) ─────────────────────────────
-void Renderer::separateIntoMeshes(const ModelData& md){
-    // Delete old GPU objects
+// Re-upload all m_meshes (called after GL context recreation)
+void Renderer::reuploadAllMeshes(){
     for(auto& mo:m_meshes){
-        if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
-        if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
-        if(mo.ibo) glDeleteBuffers(1,&mo.ibo);
+        if(mo.vertices.empty()) continue;
+        // Clear stale handles before re-uploading
+        mo.vao=0; mo.vbo=0; mo.ibo=0; mo.gpuReady=false;
+        uploadMeshObject(mo);
     }
-    m_meshes.clear();
+    if(!m_meshes.empty())
+        LOGI("reuploadAllMeshes: re-uploaded %d mesh(es) after context recreation", (int)m_meshes.size());
+}
 
+// ── separateMeshesCPU ─────────────────────────────────────────────────────────
+// Pure CPU work — NO OpenGL calls — safe to call from IO thread
+void Renderer::separateMeshesCPU(const ModelData& md,
+                                   std::vector<MeshObject>& out,
+                                   float cr, float cg, float cb){
+    out.clear();
     size_t n = md.vertices.size();
     size_t triCount = md.indices.size()/3;
+    if(n==0||triCount==0) return;
 
     // Union-Find on vertices
     std::vector<size_t> parent(n);
     std::iota(parent.begin(),parent.end(),0);
-    std::function<size_t(size_t)> find=[&](size_t x)->size_t{
+
+    // Iterative path-compressed find (avoids std::function overhead)
+    auto find=[&](size_t x) -> size_t {
         while(parent[x]!=x){ parent[x]=parent[parent[x]]; x=parent[x]; }
         return x;
     };
@@ -179,43 +199,39 @@ void Renderer::separateIntoMeshes(const ModelData& md){
         a=find(a); b=find(b); if(a!=b) parent[a]=b;
     };
 
-    // Union vertices within each triangle
     for(size_t t=0;t<triCount;++t){
         size_t i0=md.indices[t*3+0], i1=md.indices[t*3+1], i2=md.indices[t*3+2];
         unite(i0,i1); unite(i1,i2);
     }
 
-    // Group triangles by root
-    std::unordered_map<size_t,std::vector<size_t>> groups; // root→list of triangle indices
+    // Group triangles by root component
+    std::unordered_map<size_t,std::vector<size_t>> groups;
+    groups.reserve(64);
     for(size_t t=0;t<triCount;++t){
-        size_t root=find(md.indices[t*3]);
-        groups[root].push_back(t);
+        groups[find(md.indices[t*3])].push_back(t);
     }
 
-    // Build MeshObject per group
+    // Build one MeshObject per component (NO GPU calls)
     int gi=0;
+    out.reserve(groups.size());
     for(auto& [root,tris]:groups){
         MeshObject mo;
-        mo.name = "Mesh_" + std::to_string(++gi);
-        mo.colorR=m_colorR; mo.colorG=m_colorG; mo.colorB=m_colorB;
+        mo.name   = "Mesh_" + std::to_string(++gi);
+        mo.colorR = cr; mo.colorG = cg; mo.colorB = cb;
+        // vao/vbo/ibo stay 0 — uploadMeshObject called later on GL thread
 
-        // Remap vertices
         std::unordered_map<unsigned int,unsigned int> remap;
+        remap.reserve(tris.size()*3);
         for(size_t t:tris){
             for(int k=0;k<3;++k){
                 unsigned int vi=md.indices[t*3+k];
-                if(remap.find(vi)==remap.end()){
-                    remap[vi]=(unsigned int)mo.vertices.size();
-                    mo.vertices.push_back(md.vertices[vi]);
-                }
-                mo.indices.push_back(remap[vi]);
+                auto [it,inserted]=remap.emplace(vi,(unsigned int)mo.vertices.size());
+                if(inserted) mo.vertices.push_back(md.vertices[vi]);
+                mo.indices.push_back(it->second);
             }
         }
-        uploadMeshObject(mo);
-        m_meshes.push_back(std::move(mo));
+        out.push_back(std::move(mo));
     }
-
-    LOGI("Separated into %d mesh(es)", (int)m_meshes.size());
 }
 
 // ── Matrix helpers ────────────────────────────────────────────────────────────
@@ -290,7 +306,6 @@ void Renderer::draw(){
             glBindVertexArray(0);
         }
 
-        // Selected mesh bounding box overlay
         if(mo.selected && m_bbIndexCount>0){
             glUseProgram(m_wireProg);
             glUniformMatrix4fv(glGetUniformLocation(m_wireProg,"uMVP"),1,GL_FALSE,mvp.m);
@@ -303,7 +318,6 @@ void Renderer::draw(){
         }
     }
 
-    // Global bounding box
     if(m_showBBox && m_bbIndexCount>0){
         Mat4 mvp=proj*view*buildGlobalMatrix();
         glUseProgram(m_wireProg);
@@ -316,7 +330,6 @@ void Renderer::draw(){
         glBindVertexArray(0);
     }
 
-    // Ruler
     if(m_rulerHasP1||m_rulerHasP2){
         Mat4 vp=proj*view;
         glUseProgram(m_wireProg);
@@ -364,12 +377,8 @@ void Renderer::touchRotate(float dx,float dy){
     m_camYaw+=dx*0.005f;
     m_camPitch=std::clamp(m_camPitch+dy*0.005f,-PI*0.48f,PI*0.48f);
 }
-void Renderer::touchZoom(float f){
-    // f>1 = pinch open = zoom in = decrease distance
-    m_camDist=std::clamp(m_camDist/f,0.1f,50.0f);
-}
+void Renderer::touchZoom(float f){ m_camDist=std::clamp(m_camDist/f,0.1f,50.0f); }
 void Renderer::touchPan(float dx,float dy){
-    // dx>0 = finger right → model right → panX increases
     float s=m_camDist/(float)std::max(m_height,1);
     m_panX+=dx*s; m_panY-=dy*s;
 }
@@ -397,50 +406,93 @@ void Renderer::setWireframe(bool on){m_wireframe=on;}
 void Renderer::setShowBoundingBox(bool on){m_showBBox=on;}
 
 // ── TWO-STEP LOAD ─────────────────────────────────────────────────────────────
-// Step 1: Call from IO/background thread — heavy CPU parsing, NO OpenGL calls
+
+// Step 1: IO thread — parse file AND do mesh separation (heavy CPU, ZERO GL calls)
 bool Renderer::parseModel(const std::string& path){
-    delete m_pendingData;
-    m_pendingData = nullptr;
-    ModelData* md = new ModelData();
-    if(!ModelLoader::load(path, *md)){
-        delete md;
-        LOGE("parseModel failed: %s", path.c_str());
+    // Clear any previously pending data
+    m_pendingMeshes.clear();
+    m_hasPending=false;
+
+    ModelData md;
+    if(!ModelLoader::load(path, md)){
+        LOGE("parseModel: load failed — %s", path.c_str());
         return false;
     }
-    m_pendingData = md;
-    LOGI("parseModel OK — %zu verts, %zu idx, %.1fx%.1fx%.1f mm",
-         md->vertices.size(), md->indices.size(),
-         md->widthMM(), md->heightMM(), md->depthMM());
+
+    // Capture colors (read-only, safe from IO thread)
+    float cr=m_colorR, cg=m_colorG, cb=m_colorB;
+
+    // All heavy CPU work (Union-Find + vertex remapping) done here on IO thread
+    separateMeshesCPU(md, m_pendingMeshes, cr, cg, cb);
+
+    if(m_pendingMeshes.empty()){
+        LOGE("parseModel: no meshes after separation — %s", path.c_str());
+        return false;
+    }
+
+    m_pendingOrigWmm        = md.widthMM();
+    m_pendingOrigHmm        = md.heightMM();
+    m_pendingOrigDmm        = md.depthMM();
+    m_pendingNormalizeScale = md.normalizeScale;
+    m_hasPending            = true;
+
+    LOGI("parseModel OK — %zu verts, %zu idx → %zu mesh(es) | %.1fx%.1fx%.1f mm",
+         md.vertices.size(), md.indices.size(), m_pendingMeshes.size(),
+         md.widthMM(), md.heightMM(), md.depthMM());
     return true;
 }
 
-// Step 2: Call from GL thread — GPU upload only, fast
+// Step 2: GL thread — ONLY GPU buffer uploads (fast, no heavy CPU work)
 bool Renderer::uploadParsed(){
-    if(!m_pendingData){
-        LOGE("uploadParsed: no pending data");
+    if(!m_hasPending || m_pendingMeshes.empty()){
+        LOGE("uploadParsed: no pending meshes");
         return false;
     }
-    m_origWmm = m_pendingData->widthMM();
-    m_origHmm = m_pendingData->heightMM();
-    m_origDmm = m_pendingData->depthMM();
-    m_normalizeScale = m_pendingData->normalizeScale;
-    separateIntoMeshes(*m_pendingData);
-    delete m_pendingData;
-    m_pendingData = nullptr;
-    m_hasModel    = !m_meshes.empty();
+
+    // Delete old mesh GPU objects
+    for(auto& mo:m_meshes){
+        if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
+        if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
+        if(mo.ibo) glDeleteBuffers(1,&mo.ibo);
+    }
+
+    m_origWmm        = m_pendingOrigWmm;
+    m_origHmm        = m_pendingOrigHmm;
+    m_origDmm        = m_pendingOrigDmm;
+    m_normalizeScale = m_pendingNormalizeScale;
+
+    // Move pending meshes into active list (zero-copy)
+    m_meshes = std::move(m_pendingMeshes);
+    m_hasPending = false;
+
+    // Fast GPU upload — this is all that runs on the GL thread
+    for(auto& mo:m_meshes) uploadMeshObject(mo);
+
+    m_hasModel     = !m_meshes.empty();
     m_selectedMesh = -1;
     resetTransform(); resetCamera(); clearRuler();
-    LOGI("uploadParsed OK — %d mesh(es)", (int)m_meshes.size());
+
+    LOGI("uploadParsed OK — %d mesh(es) uploaded to GPU", (int)m_meshes.size());
     return m_hasModel;
 }
 
-// ── Load model ───────────────────────────────────────────────────────────────
+// ── Legacy single-step load (GL thread) ──────────────────────────────────────
 bool Renderer::loadModel(const std::string& path){
     ModelData md;
     if(!ModelLoader::load(path,md)) return false;
     m_origWmm=md.widthMM(); m_origHmm=md.heightMM(); m_origDmm=md.depthMM();
     m_normalizeScale=md.normalizeScale;
-    separateIntoMeshes(md);
+
+    // Delete old GPU objects
+    for(auto& mo:m_meshes){
+        if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
+        if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
+        if(mo.ibo) glDeleteBuffers(1,&mo.ibo);
+    }
+
+    separateMeshesCPU(md, m_meshes, m_colorR, m_colorG, m_colorB);
+    for(auto& mo:m_meshes) uploadMeshObject(mo);
+
     m_hasModel=!m_meshes.empty();
     m_selectedMesh=-1;
     resetTransform(); resetCamera(); clearRuler();
@@ -475,7 +527,6 @@ void Renderer::setMeshColor(int idx,float r,float g,float b){
 void Renderer::setMeshScaleMM(int idx,float w,float h,float d){
     if(idx<0||idx>=(int)m_meshes.size()) return;
     auto& mo=m_meshes[idx];
-    // Compute mesh original size from its vertices
     float minX=FLT_MAX,minY=FLT_MAX,minZ=FLT_MAX;
     float maxX=-FLT_MAX,maxY=-FLT_MAX,maxZ=-FLT_MAX;
     for(auto& v:mo.vertices){
@@ -484,12 +535,7 @@ void Renderer::setMeshScaleMM(int idx,float w,float h,float d){
         minZ=std::min(minZ,v.pz);maxZ=std::max(maxZ,v.pz);
     }
     float sx=maxX-minX, sy=maxY-minY, sz=maxZ-minZ;
-    // sx is in normalized units; convert to mm via normalizeScale
-    float uToMM = (m_normalizeScale>1e-9f)? (1.0f/m_normalizeScale) : 1.0f;
-    // origMeshMm = sx/normalizeScale * unitToMM... simplified:
-    // desired world size = scaX * sx → desired world * uToMM/m_origWmm… 
-    // Simpler: scaX = desired_mm / (sx * mmPerUnit)
-    float mmPerUnit = (m_origWmm>1e-9f)?m_origWmm/2.0f:1.0f;
+    float mmPerUnit=(m_origWmm>1e-9f)?m_origWmm/2.0f:1.0f;
     if(sx>1e-9f) mo.scaX=w/(sx*mmPerUnit);
     if(sy>1e-9f) mo.scaY=h/(sy*mmPerUnit);
     if(sz>1e-9f) mo.scaZ=d/(sz*mmPerUnit);
@@ -543,13 +589,10 @@ bool Renderer::exportOBJ(const std::string& path) const {
 bool Renderer::exportSTL(const std::string& path) const {
     std::ofstream f(path,std::ios::binary);
     if(!f) return false;
-    // Count total triangles
     uint32_t total=0;
     for(const auto& mo:m_meshes) if(mo.visible) total+=(uint32_t)(mo.indices.size()/3);
-
     char header[80]="3D Model Viewer Export"; f.write(header,80);
     f.write(reinterpret_cast<const char*>(&total),4);
-
     for(const auto& mo:m_meshes){
         if(!mo.visible) continue;
         for(size_t i=0;i+2<mo.indices.size();i+=3){

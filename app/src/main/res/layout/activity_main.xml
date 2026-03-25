@@ -3,7 +3,7 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#1A1A20">
+    android:background="#0D0D12">
 
     <!-- Full-screen GL Surface -->
     <com.modelviewer3d.ModelGLSurfaceView
@@ -11,71 +11,80 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"/>
 
-    <!-- ══ TOP TOOLBAR ══════════════════════════════════════════════════════ -->
+    <!-- ══ TOP TOOLBAR ═══════════════════════════════════════════════════════ -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
-        android:layout_height="56dp"
+        android:layout_height="52dp"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingStart="8dp"
-        android:paddingEnd="8dp"
-        android:background="#CC12121A"
-        android:elevation="4dp">
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
+        android:background="#E6090912"
+        android:elevation="6dp">
+
+        <!-- App logo/title -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="3D"
+            android:textColor="#4FC3F7"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:paddingStart="8dp"
+            android:paddingEnd="4dp"/>
+
+        <View android:layout_width="1dp" android:layout_height="24dp"
+            android:background="#33FFFFFF" android:layout_marginEnd="4dp"/>
 
         <ImageButton android:id="@+id/btnOpen"       style="@style/ToolbarBtn" android:src="@drawable/ic_folder"     android:contentDescription="Open"/>
         <ImageButton android:id="@+id/btnEdit"       style="@style/ToolbarBtn" android:src="@drawable/ic_tune"       android:contentDescription="Edit"/>
-        <ImageButton android:id="@+id/btnUndo"       style="@style/ToolbarBtn" android:src="@drawable/ic_undo"       android:contentDescription="Undo"/>
-        <ImageButton android:id="@+id/btnRedo"       style="@style/ToolbarBtn" android:src="@drawable/ic_redo"       android:contentDescription="Redo"/>
-        <ImageButton android:id="@+id/btnScreenshot" style="@style/ToolbarBtn" android:src="@drawable/ic_screenshot" android:contentDescription="Screenshot"/>
-
-        <!-- Ruler tool button -->
-        <ImageButton
-            android:id="@+id/btnRuler"
-            style="@style/ToolbarBtn"
-            android:src="@drawable/ic_ruler"
-            android:alpha="0.5"
-            android:contentDescription="Ruler"/>
+        <ImageButton android:id="@+id/btnMeshList"   style="@style/ToolbarBtn" android:src="@drawable/ic_layers"     android:contentDescription="Meshes"/>
+        <ImageButton android:id="@+id/btnRuler"      style="@style/ToolbarBtn" android:src="@drawable/ic_ruler"      android:alpha="0.45" android:contentDescription="Ruler"/>
+        <ImageButton android:id="@+id/btnExport"     style="@style/ToolbarBtn" android:src="@drawable/ic_export"     android:contentDescription="Export"/>
 
         <Space android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1"/>
 
-        <ImageButton android:id="@+id/btnReset" style="@style/ToolbarBtn" android:src="@drawable/ic_reset" android:contentDescription="Reset"/>
+        <ImageButton android:id="@+id/btnUndo"       style="@style/ToolbarBtn" android:src="@drawable/ic_undo"       android:contentDescription="Undo"/>
+        <ImageButton android:id="@+id/btnRedo"       style="@style/ToolbarBtn" android:src="@drawable/ic_redo"       android:contentDescription="Redo"/>
+        <ImageButton android:id="@+id/btnScreenshot" style="@style/ToolbarBtn" android:src="@drawable/ic_screenshot" android:contentDescription="Screenshot"/>
+        <ImageButton android:id="@+id/btnReset"      style="@style/ToolbarBtn" android:src="@drawable/ic_reset"      android:contentDescription="Reset"/>
 
         <TextView
             android:id="@+id/tvFps"
-            android:layout_width="wrap_content"
+            android:layout_width="36dp"
             android:layout_height="wrap_content"
-            android:text="-- FPS"
-            android:textColor="#664FC3F7"
-            android:textSize="10sp"
+            android:text="--"
+            android:textColor="#554FC3F7"
+            android:textSize="9sp"
             android:fontFamily="monospace"
-            android:paddingStart="6dp"
-            android:paddingEnd="4dp"/>
+            android:gravity="center"/>
     </LinearLayout>
 
-    <!-- ══ CENTER HINT (before model loaded) ════════════════════════════════ -->
+    <!-- ══ CENTER HINT ═══════════════════════════════════════════════════════ -->
     <LinearLayout
         android:id="@+id/tvHint"
-        android:layout_width="wrap_content"
+        android:layout_width="240dp"
         android:layout_height="wrap_content"
         android:layout_gravity="center"
         android:orientation="vertical"
         android:gravity="center"
-        android:padding="32dp"
-        android:background="#881A1A28">
+        android:padding="28dp"
+        android:background="@drawable/bg_hint_card">
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="📦"
-            android:textSize="48sp"
+            android:textSize="44sp"
             android:gravity="center"/>
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Tap 📂 to open a 3D model"
-            android:textColor="#CCFFFFFF"
+            android:text="Open a 3D Model"
+            android:textColor="#EEFFFFFF"
             android:textSize="15sp"
+            android:textStyle="bold"
             android:gravity="center"
             android:paddingTop="8dp"/>
         <TextView
@@ -86,28 +95,41 @@
             android:textSize="12sp"
             android:gravity="center"
             android:paddingTop="4dp"/>
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Tap 📂 to begin"
+            android:textColor="#44FFFFFF"
+            android:textSize="11sp"
+            android:gravity="center"
+            android:paddingTop="8dp"/>
     </LinearLayout>
 
-    <!-- ══ RULER OVERLAY (shown when ruler active) ══════════════════════════ -->
+    <!-- ══ RULER OVERLAY ══════════════════════════════════════════════════════ -->
     <LinearLayout
         android:id="@+id/rulerOverlay"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="52dp"
         android:layout_gravity="bottom"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:padding="12dp"
-        android:background="#EE1A1A28"
+        android:paddingStart="16dp"
+        android:paddingEnd="12dp"
+        android:background="#EE0D1A30"
         android:visibility="gone"
         android:elevation="6dp">
+
+        <TextView android:text="📐" android:textSize="18sp"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:paddingEnd="8dp"/>
 
         <TextView
             android:id="@+id/tvRulerInfo"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="📐 Tap mesh for Point 1"
-            android:textColor="#FFFFFFFF"
+            android:text="Tap mesh surface — Point 1"
+            android:textColor="#EEFFFFFF"
             android:textSize="13sp"/>
 
         <Button
@@ -115,36 +137,45 @@
             android:layout_width="wrap_content"
             android:layout_height="36dp"
             android:text="Clear"
-            android:textSize="12sp"
-            android:paddingStart="16dp"
-            android:paddingEnd="16dp"/>
+            android:textSize="11sp"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"/>
     </LinearLayout>
 
-    <!-- ══ LOADING OVERLAY ══════════════════════════════════════════════════ -->
-    <LinearLayout
+    <!-- ══ LOADING OVERLAY ════════════════════════════════════════════════════ -->
+    <FrameLayout
         android:id="@+id/loadingOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:gravity="center"
-        android:orientation="vertical"
         android:background="#CC000008"
         android:visibility="gone"
-        android:elevation="8dp">
+        android:elevation="10dp">
 
-        <ProgressBar
-            android:layout_width="64dp"
-            android:layout_height="64dp"
-            android:indeterminate="true"
-            android:indeterminateTint="#4FC3F7"/>
-
-        <TextView
-            android:id="@+id/tvLoading"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="180dp"
             android:layout_height="wrap_content"
-            android:text="Loading…"
-            android:textColor="#CCFFFFFF"
-            android:textSize="14sp"
-            android:paddingTop="16dp"/>
-    </LinearLayout>
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@drawable/bg_hint_card"
+            android:padding="28dp">
+
+            <ProgressBar
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:indeterminate="true"
+                android:indeterminateTint="#4FC3F7"/>
+
+            <TextView
+                android:id="@+id/tvLoading"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Loading…"
+                android:textColor="#CCFFFFFF"
+                android:textSize="13sp"
+                android:gravity="center"
+                android:paddingTop="12dp"/>
+        </LinearLayout>
+    </FrameLayout>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

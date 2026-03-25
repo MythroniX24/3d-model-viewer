@@ -1,8 +1,6 @@
 package com.modelviewer3d
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaScannerConnection
 import android.net.Uri
@@ -15,7 +13,6 @@ import android.view.WindowManager
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -49,9 +46,6 @@ class MainActivity : AppCompatActivity() {
 
     private val filePicker = registerForActivityResult(ActivityResultContracts.OpenDocument())
     { uri -> uri?.let { openModelFromUri(it) } }
-
-    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions())
-    { r -> if (r.values.all { it }) launchFilePicker() else toast("Storage permission required") }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -215,20 +209,17 @@ class MainActivity : AppCompatActivity() {
 
     // ── File open ─────────────────────────────────────────────────────────────
     private fun requestOpenFile() {
-        if (hasStoragePermission()) launchFilePicker() else requestStoragePermission()
+        // SAF picker already grants read access for the selected document.
+        launchFilePicker()
     }
-    private fun hasStoragePermission() = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> true
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q        -> true
-        else -> ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+    private fun launchFilePicker() {
+        filePicker.launch(arrayOf(
+            "model/*",
+            "application/octet-stream",
+            "text/plain",
+            "*/*"
+        ))
     }
-    private fun requestStoragePermission() {
-        permLauncher.launch(
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
-            else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE))
-    }
-    private fun launchFilePicker() { filePicker.launch(arrayOf("*/*")) }
 
     private fun openModelFromUri(uri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {

@@ -42,6 +42,9 @@ class MainActivity : AppCompatActivity() {
     private var tvRulerInfo:    TextView?    = null
     private var btnRuler:       ImageButton? = null
 
+    // Track last loaded file so we can re-upload after GL context loss
+    private var lastLoadedFilePath: String? = null
+
     private var rulerPoint1: FloatArray? = null
     private var rulerPoint2: FloatArray? = null
     private var rulerActive = false
@@ -71,6 +74,14 @@ class MainActivity : AppCompatActivity() {
             renderer = ModelRenderer()
             renderer.onFpsUpdate = { fps ->
                 runOnUiThread { tvFps?.text = "%.0f".format(fps) }
+            }
+            renderer.onContextLost = {
+                // GL context was recreated (e.g. app came back from background)
+                // Re-upload the last model if we have one
+                val path = lastLoadedFilePath
+                if (path != null) {
+                    reloadModelFromPath(path)
+                }
             }
             glView.attachRenderer(renderer)
             glView.onRulerPick = { pt -> onRulerPointPicked(pt) }
@@ -236,7 +247,14 @@ class MainActivity : AppCompatActivity() {
                 val dest = File(cacheDir, name)
 
                 // Copy URI → local cache file
-                contentResolver.openInputStream(uri)?.use { inp ->
+                val inputStream = contentResolver.openInputStream(uri)
+                if (inputStream == null) {
+                    withContext(Dispatchers.Main) {
+                        toast("Cannot open file — permission denied?")
+                    }
+                    return@launch
+                }
+                inputStream.use { inp ->
                     FileOutputStream(dest).use { out -> inp.copyTo(out) }
                 }
 
@@ -263,18 +281,27 @@ class MainActivity : AppCompatActivity() {
                 withContext(Dispatchers.Main) { showLoading("Uploading to GPU…") }
 
                 // ── Step 2: Upload on GL thread (fast — just buffer uploads) ──
+                // Use timeout to prevent infinite hang if GL thread is paused/unavailable
                 var uploadOk = false
                 val latch = java.util.concurrent.CountDownLatch(1)
                 glView.queueEvent {
                     try { uploadOk = NativeLib.nativeUploadParsed() }
                     catch (e: Exception) { uploadOk = false }
-                    latch.countDown()
+                    finally { latch.countDown() }  // always release, even on exception
                 }
-                latch.await()   // safe — we're on IO thread, not main thread
+                // Wait max 10 seconds — avoids infinite loading spinner
+                val completed = latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
 
                 withContext(Dispatchers.Main) {
                     hideLoading()
-                    toast(if (uploadOk) "✓ $name loaded" else "GPU upload failed")
+                    when {
+                        !completed -> toast("GPU upload timed out — please try again")
+                        uploadOk   -> {
+                            lastLoadedFilePath = dest.absolutePath
+                            toast("✓ $name loaded")
+                        }
+                        else       -> toast("GPU upload failed")
+                    }
                 }
 
             } catch (e: Exception) {
@@ -285,6 +312,22 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+    // Re-upload a previously cached model file after GL context loss
+    private fun reloadModelFromPath(path: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val parseOk = try { NativeLib.nativeParseModel(path) } catch (e: Exception) { false }
+            if (!parseOk) return@launch
+            val latch = java.util.concurrent.CountDownLatch(1)
+            var uploadOk = false
+            glView.queueEvent {
+                try { uploadOk = NativeLib.nativeUploadParsed() }
+                catch (e: Exception) { uploadOk = false }
+                finally { latch.countDown() }
+            }
+            latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+        }
+    }
+
     private fun resolveFileName(uri: Uri): String? {
         if (uri.scheme=="file") return uri.lastPathSegment
         contentResolver.query(uri,null,null,null,null)?.use { c ->

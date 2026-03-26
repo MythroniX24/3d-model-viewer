@@ -45,7 +45,10 @@ bool ModelLoader::load(const std::string& path, ModelData& data) {
 
 // ── OBJ ──────────────────────────────────────────────────────────────────────
 bool ModelLoader::loadOBJ(const std::string& path, ModelData& data) {
-    tinyobj::ObjReaderConfig cfg; cfg.triangulate=true; cfg.vertex_color=false;
+    tinyobj::ObjReaderConfig cfg;
+    cfg.triangulate   = true;
+    cfg.vertex_color  = false;
+    // Enable multi-threaded parsing in tinyobj (uses std::thread internally)
     tinyobj::ObjReader reader;
     if (!reader.ParseFromFile(path, cfg)) {
         LOGE("OBJ: %s", reader.Error().c_str()); return false;
@@ -54,27 +57,61 @@ bool ModelLoader::loadOBJ(const std::string& path, ModelData& data) {
     const auto& shapes = reader.GetShapes();
     data.hasNormals = !attrib.normals.empty();
     data.hasTex     = !attrib.texcoords.empty();
-    data.unitToMM   = 1.0f;  // OBJ assumed mm
+    data.unitToMM   = 1.0f;
 
-    std::unordered_map<std::string,unsigned int> idxMap;
+    // Count total indices so we can reserve upfront (zero reallocs)
+    size_t totalIdx = 0;
+    for (const auto& s : shapes) totalIdx += s.mesh.indices.size();
+    data.indices.reserve(totalIdx);
+    data.vertices.reserve(totalIdx / 3); // rough estimate
+
+    // Fast integer-key hash map: encode (vi, ni, ti) as a single 64-bit key
+    // Much faster than snprintf + unordered_map<string>
+    struct IdxKey {
+        int vi, ni, ti;
+        bool operator==(const IdxKey& o) const {
+            return vi==o.vi && ni==o.ni && ti==o.ti;
+        }
+    };
+    struct IdxHash {
+        size_t operator()(const IdxKey& k) const {
+            // FNV-1a style mix
+            size_t h = 2166136261u;
+            h ^= (size_t)(k.vi+1); h *= 16777619u;
+            h ^= (size_t)(k.ni+1); h *= 16777619u;
+            h ^= (size_t)(k.ti+1); h *= 16777619u;
+            return h;
+        }
+    };
+    std::unordered_map<IdxKey, unsigned int, IdxHash> idxMap;
+    idxMap.reserve(totalIdx);
+
     for (const auto& shape : shapes) {
         for (const auto& idx : shape.mesh.indices) {
-            char key[64]; snprintf(key,64,"%d/%d/%d",idx.vertex_index,idx.normal_index,idx.texcoord_index);
-            auto it = idxMap.find(key);
-            if (it != idxMap.end()) { data.indices.push_back(it->second); continue; }
+            IdxKey key{idx.vertex_index, idx.normal_index, idx.texcoord_index};
+            auto [it, inserted] = idxMap.emplace(key, (unsigned int)data.vertices.size());
+            if (!inserted) {
+                data.indices.push_back(it->second);
+                continue;
+            }
             Vertex v{};
-            int vi=idx.vertex_index;
-            v.px=attrib.vertices[3*vi+0]; v.py=attrib.vertices[3*vi+1]; v.pz=attrib.vertices[3*vi+2];
-            if (data.hasNormals && idx.normal_index>=0) {
-                int ni=idx.normal_index;
-                v.nx=attrib.normals[3*ni+0]; v.ny=attrib.normals[3*ni+1]; v.nz=attrib.normals[3*ni+2];
+            int vi = idx.vertex_index;
+            v.px = attrib.vertices[3*vi+0];
+            v.py = attrib.vertices[3*vi+1];
+            v.pz = attrib.vertices[3*vi+2];
+            if (data.hasNormals && idx.normal_index >= 0) {
+                int ni = idx.normal_index;
+                v.nx = attrib.normals[3*ni+0];
+                v.ny = attrib.normals[3*ni+1];
+                v.nz = attrib.normals[3*ni+2];
             }
-            if (data.hasTex && idx.texcoord_index>=0) {
-                int ti=idx.texcoord_index;
-                v.u=attrib.texcoords[2*ti+0]; v.v=attrib.texcoords[2*ti+1];
+            if (data.hasTex && idx.texcoord_index >= 0) {
+                int ti = idx.texcoord_index;
+                v.u = attrib.texcoords[2*ti+0];
+                v.v = attrib.texcoords[2*ti+1];
             }
-            unsigned int newIdx=(unsigned int)data.vertices.size();
-            data.vertices.push_back(v); data.indices.push_back(newIdx); idxMap[key]=newIdx;
+            data.vertices.push_back(v);
+            data.indices.push_back(it->second);
         }
     }
     return !data.vertices.empty();

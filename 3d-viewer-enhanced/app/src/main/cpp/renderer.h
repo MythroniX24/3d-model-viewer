@@ -12,7 +12,6 @@ struct TransformState {
     float scaX=1,scaY=1,scaZ=1;
 };
 
-// ── Per-mesh sub-object ───────────────────────────────────────────────────────
 struct MeshObject {
     std::string name;
     std::vector<Vertex>       vertices;
@@ -21,7 +20,6 @@ struct MeshObject {
     GLuint vao=0,vbo=0,ibo=0;
     bool   gpuReady=false;
 
-    // Per-mesh transform (additive to global)
     float rotX=0,rotY=0,rotZ=0;
     float posX=0,posY=0,posZ=0;
     float scaX=1,scaY=1,scaZ=1;
@@ -39,10 +37,15 @@ public:
     void draw();
     void resize(int width, int height);
 
-    // TWO-STEP LOAD: parse on any thread, upload on GL thread only
-    bool parseModel(const std::string& path);   // Step 1 — call from IO thread
-    bool uploadParsed();                         // Step 2 — call from GL thread
-    bool loadModel(const std::string& path);     // Legacy: parse+upload (GL thread only)
+    // TWO-STEP LOAD
+    bool parseModel(const std::string& path);  // IO thread — parse only
+    bool uploadParsed();                        // GL thread — GPU upload as single mesh (instant)
+    bool loadModel(const std::string& path);   // Legacy
+
+    // MANUAL SEPARATION (called by user via button)
+    bool performSeparationCPU();   // IO thread — Union-Find, NO GL calls
+    bool performSeparationGPU();   // GL thread — re-upload separated meshes
+    bool isSeparated() const { return m_isSeparated; }
 
     // Camera
     void touchRotate(float dx, float dy);
@@ -62,11 +65,11 @@ public:
     void setAmbient(float a); void setDiffuse(float d);
     void setWireframe(bool on); void setShowBoundingBox(bool on);
 
-    // ── Mesh separation ───────────────────────────────────────────────────
+    // Mesh
     int  getMeshCount() const { return (int)m_meshes.size(); }
     void getMeshName(int idx, char* buf, int bufLen) const;
-    void selectMesh(int idx);      // -1 = deselect all
-    int  getSelectedMesh() const   { return m_selectedMesh; }
+    void selectMesh(int idx);
+    int  getSelectedMesh() const { return m_selectedMesh; }
     void deleteMesh(int idx);
     void setMeshVisible(int idx, bool v);
     void setMeshColor(int idx, float r, float g, float b);
@@ -74,16 +77,16 @@ public:
     void getMeshSizeMM(int idx, float& w, float& h, float& d) const;
     int  getMeshVertexCount(int idx) const;
 
-    // ── Export ────────────────────────────────────────────────────────────
+    // Export
     bool exportOBJ(const std::string& path) const;
     bool exportSTL(const std::string& path) const;
 
-    // ── Ruler ─────────────────────────────────────────────────────────────
+    // Ruler
     bool pickPoint(float sx,float sy,float sw,float sh,float out[3]);
     void setRulerPoints(bool h1,float* p1,bool h2,float* p2);
     void clearRuler();
 
-    // ── Size info ─────────────────────────────────────────────────────────
+    // Size info
     void getModelSizeMM(float& w,float& h,float& d) const;
     void getCurrentSizeMM(float& w,float& h,float& d) const;
 
@@ -94,57 +97,49 @@ public:
     TransformState getTransform() const;
 
 private:
-    // GPU globals
     GLuint m_mainProg=0, m_wireProg=0;
     GLuint m_bbVao=0, m_bbVbo=0, m_bbIbo=0;
     GLuint m_rulerVao=0, m_rulerVbo=0;
     GLsizei m_bbIndexCount=0;
 
-    // Meshes
     std::vector<MeshObject> m_meshes;
-    int m_selectedMesh = -1;
-    bool m_hasModel = false;
+    int  m_selectedMesh = -1;
+    bool m_hasModel     = false;
+    bool m_isSeparated  = false;
 
-    // Viewport
     int m_width=1, m_height=1;
 
-    // Camera
     float m_camYaw=0.4f, m_camPitch=0.3f, m_camDist=3.5f;
     float m_panX=0, m_panY=0;
 
-    // Global transform
     float m_rotX=0,m_rotY=0,m_rotZ=0;
     float m_posX=0,m_posY=0,m_posZ=0;
     float m_scaX=1,m_scaY=1,m_scaZ=1;
 
-    // Pending parsed data (set by parseModel, consumed by uploadParsed)
-    ModelData* m_pendingData = nullptr;   // raw pointer, owned by renderer
+    // Pending data between parse and upload
+    ModelData*              m_pendingData  = nullptr;
+    std::vector<MeshObject> m_pendingMeshes;  // used by performSeparation
 
-    // Original size in mm
     float m_origWmm=1,m_origHmm=1,m_origDmm=1;
     float m_normalizeScale=1.0f;
 
-    // Lighting/visual
     float m_colorR=0.72f,m_colorG=0.72f,m_colorB=0.92f;
     float m_ambient=0.3f, m_diffuse=0.8f;
     bool  m_wireframe=false, m_showBBox=false;
 
-    // FPS
     float   m_fps=0; int m_frameCount=0; int64_t m_fpsTimerNs=0;
 
-    // Ruler
     bool  m_rulerHasP1=false, m_rulerHasP2=false;
     float m_rulerP1[3]={}, m_rulerP2[3]={};
 
-    // Undo/redo
     static constexpr int MAX_UNDO=50;
     std::vector<TransformState> m_undoStack, m_redoStack;
 
-    // Internals
     void buildShaders();
     void buildBoundingBox();
     void uploadMeshObject(MeshObject& mo);
     void separateIntoMeshes(const ModelData& md);
+    void separateMeshesCPU(const ModelData& md, std::vector<MeshObject>& out);
     Mat4 buildGlobalMatrix() const;
     Mat4 buildMeshMatrix(const MeshObject& mo) const;
     void updateFPS();

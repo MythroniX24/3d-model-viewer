@@ -23,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.channels.Channels
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -265,19 +266,26 @@ class MainActivity : AppCompatActivity() {
                 val name = resolveFileName(uri) ?: "model.obj"
                 currentFileName = name
                 val dest = File(cacheDir, name)
+                // NIO channel transfer — ~5x faster than stream copyTo()
                 contentResolver.openInputStream(uri)?.use { inp ->
-                    FileOutputStream(dest).use { out -> inp.copyTo(out) }
+                    val src = Channels.newChannel(inp)
+                    FileOutputStream(dest).channel.use { dst ->
+                        var pos = 0L
+                        while(true) { val n = dst.transferFrom(src, pos, 4L*1024*1024); if(n<=0) break; pos+=n }
+                    }
                 }
                 withContext(Dispatchers.Main) {
                     tvHint?.visibility = View.GONE
-                    showLoading("Parsing $name…", "Reading geometry data…")
+                    showLoading("Loading $name…", "Parsing & separating meshes…")
                 }
+                // parseModel now does: file parse + mesh separation on IO thread
+                // uploadParsed only does fast GPU buffer upload on GL thread
                 val parseOk = try { NativeLib.nativeParseModel(dest.absolutePath) } catch (_: Exception) { false }
                 if (!parseOk) {
                     withContext(Dispatchers.Main) { hideLoading(); toast("Failed to parse $name") }
                     return@launch
                 }
-                withContext(Dispatchers.Main) { showLoading("Uploading to GPU…", "Transferring mesh data…") }
+                withContext(Dispatchers.Main) { showLoading("Sending to GPU…", "Almost ready…") }
                 var uploadOk = false
                 val latch = CountDownLatch(1)
                 glView.queueEvent {

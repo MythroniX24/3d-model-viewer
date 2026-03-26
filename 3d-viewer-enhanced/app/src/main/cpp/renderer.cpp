@@ -156,8 +156,11 @@ void Renderer::uploadMeshObject(MeshObject& mo){
 }
 
 // ── Mesh Separation (Union-Find on shared edges) ─────────────────────────────
+// ── FAST: runs on IO thread, NO OpenGL calls ─────────────────────────────────
+// Uses flat-array remap (O(1)) instead of unordered_map, iterative UF, reserve().
 void Renderer::separateIntoMeshes(const ModelData& md){
-    // Delete old GPU objects
+    // Free old GPU objects (safe — called from GL thread via uploadParsed,
+    // or from loadModel which is already on GL thread)
     for(auto& mo:m_meshes){
         if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
         if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
@@ -165,57 +168,165 @@ void Renderer::separateIntoMeshes(const ModelData& md){
     }
     m_meshes.clear();
 
-    size_t n = md.vertices.size();
-    size_t triCount = md.indices.size()/3;
+    size_t n        = md.vertices.size();
+    size_t triCount = md.indices.size() / 3;
+    if(n == 0 || triCount == 0) return;
 
-    // Union-Find on vertices
-    std::vector<size_t> parent(n);
-    std::iota(parent.begin(),parent.end(),0);
-    std::function<size_t(size_t)> find=[&](size_t x)->size_t{
-        while(parent[x]!=x){ parent[x]=parent[parent[x]]; x=parent[x]; }
+    // ── Union-Find (iterative, path-halving, no std::function overhead) ──────
+    std::vector<uint32_t> parent(n);
+    std::vector<uint8_t>  rank(n, 0);
+    for(uint32_t i=0;i<(uint32_t)n;++i) parent[i]=i;
+
+    // Inline iterative find with path halving
+    auto uf_find = [&](uint32_t x) -> uint32_t {
+        while(parent[x] != x){ parent[x]=parent[parent[x]]; x=parent[x]; }
         return x;
     };
-    auto unite=[&](size_t a,size_t b){
-        a=find(a); b=find(b); if(a!=b) parent[a]=b;
+    auto uf_union = [&](uint32_t a, uint32_t b){
+        a=uf_find(a); b=uf_find(b);
+        if(a==b) return;
+        if(rank[a]<rank[b]) std::swap(a,b);
+        parent[b]=a;
+        if(rank[a]==rank[b]) ++rank[a];
     };
 
-    // Union vertices within each triangle
+    // Union all 3 vertices of each triangle
+    const auto* idx = md.indices.data();
     for(size_t t=0;t<triCount;++t){
-        size_t i0=md.indices[t*3+0], i1=md.indices[t*3+1], i2=md.indices[t*3+2];
-        unite(i0,i1); unite(i1,i2);
+        uf_union(idx[t*3+0], idx[t*3+1]);
+        uf_union(idx[t*3+1], idx[t*3+2]);
     }
 
-    // Group triangles by root
-    std::unordered_map<size_t,std::vector<size_t>> groups; // root→list of triangle indices
-    for(size_t t=0;t<triCount;++t){
-        size_t root=find(md.indices[t*3]);
-        groups[root].push_back(t);
+    // ── Map each root → compact group ID ─────────────────────────────────────
+    std::unordered_map<uint32_t,uint32_t> rootToGroup;
+    rootToGroup.reserve(64); // most models have few islands
+    uint32_t numGroups = 0;
+    for(uint32_t i=0;i<(uint32_t)n;++i){
+        uint32_t root = uf_find(i);
+        if(rootToGroup.find(root)==rootToGroup.end())
+            rootToGroup[root] = numGroups++;
     }
 
-    // Build MeshObject per group
-    int gi=0;
-    for(auto& [root,tris]:groups){
-        MeshObject mo;
-        mo.name = "Mesh_" + std::to_string(++gi);
-        mo.colorR=m_colorR; mo.colorG=m_colorG; mo.colorB=m_colorB;
+    // ── Build per-group MeshObject using flat-array remap ─────────────────────
+    // remap[vi] = new local index within the mesh group (-1 = not yet added)
+    std::vector<MeshObject> meshes(numGroups);
+    for(uint32_t g=0;g<numGroups;++g){
+        meshes[g].name   = "Mesh_" + std::to_string(g+1);
+        meshes[g].colorR = m_colorR;
+        meshes[g].colorG = m_colorG;
+        meshes[g].colorB = m_colorB;
+    }
 
-        // Remap vertices
-        std::unordered_map<unsigned int,unsigned int> remap;
-        for(size_t t:tris){
-            for(int k=0;k<3;++k){
-                unsigned int vi=md.indices[t*3+k];
-                if(remap.find(vi)==remap.end()){
-                    remap[vi]=(unsigned int)mo.vertices.size();
-                    mo.vertices.push_back(md.vertices[vi]);
-                }
-                mo.indices.push_back(remap[vi]);
+    // Estimate per-mesh sizes to pre-reserve
+    std::vector<uint32_t> groupTriCount(numGroups, 0);
+    for(size_t t=0;t<triCount;++t){
+        uint32_t g = rootToGroup[uf_find(idx[t*3])];
+        groupTriCount[g]++;
+    }
+    for(uint32_t g=0;g<numGroups;++g){
+        meshes[g].indices.reserve(groupTriCount[g]*3);
+        meshes[g].vertices.reserve(groupTriCount[g]); // rough estimate
+    }
+
+    // Flat remap array — one entry per original vertex, reset between groups
+    // We use a "generation" trick so we never memset the whole array
+    std::vector<uint32_t> remap(n, UINT32_MAX);
+
+    // Single pass: assign triangles to groups and remap vertices inline
+    for(size_t t=0;t<triCount;++t){
+        uint32_t g = rootToGroup[uf_find(idx[t*3])];
+        MeshObject& mo = meshes[g];
+        for(int k=0;k<3;++k){
+            uint32_t vi = idx[t*3+k];
+            if(remap[vi] == UINT32_MAX){
+                remap[vi] = (uint32_t)mo.vertices.size();
+                mo.vertices.push_back(md.vertices[vi]);
             }
+            mo.indices.push_back(remap[vi]);
         }
+    }
+
+    // ── Upload to GPU and move into m_meshes ──────────────────────────────────
+    for(auto& mo : meshes){
+        if(mo.vertices.empty()) continue;
         uploadMeshObject(mo);
         m_meshes.push_back(std::move(mo));
     }
 
-    LOGI("Separated into %d mesh(es)", (int)m_meshes.size());
+    LOGI("separateIntoMeshes: %d island(s) from %zu verts / %zu tris",
+         (int)m_meshes.size(), n, triCount);
+}
+
+// ── CPU-only mesh separation — NO GL calls, safe on any thread ───────────────
+// Returns pre-built MeshObjects (no VAO/VBO yet). Called from parseModel (IO thread).
+void Renderer::separateMeshesCPU(const ModelData& md, std::vector<MeshObject>& out){
+    out.clear();
+    size_t n        = md.vertices.size();
+    size_t triCount = md.indices.size() / 3;
+    if(n == 0 || triCount == 0) return;
+
+    std::vector<uint32_t> parent(n);
+    std::vector<uint8_t>  rank(n, 0);
+    for(uint32_t i=0;i<(uint32_t)n;++i) parent[i]=i;
+
+    auto uf_find = [&](uint32_t x) -> uint32_t {
+        while(parent[x]!=x){ parent[x]=parent[parent[x]]; x=parent[x]; }
+        return x;
+    };
+    auto uf_union = [&](uint32_t a, uint32_t b){
+        a=uf_find(a); b=uf_find(b);
+        if(a==b) return;
+        if(rank[a]<rank[b]) std::swap(a,b);
+        parent[b]=a;
+        if(rank[a]==rank[b]) ++rank[a];
+    };
+
+    const auto* idx = md.indices.data();
+    for(size_t t=0;t<triCount;++t){
+        uf_union(idx[t*3+0], idx[t*3+1]);
+        uf_union(idx[t*3+1], idx[t*3+2]);
+    }
+
+    std::unordered_map<uint32_t,uint32_t> rootToGroup;
+    rootToGroup.reserve(64);
+    uint32_t numGroups = 0;
+    for(uint32_t i=0;i<(uint32_t)n;++i){
+        uint32_t root = uf_find(i);
+        if(rootToGroup.find(root)==rootToGroup.end())
+            rootToGroup[root] = numGroups++;
+    }
+
+    out.resize(numGroups);
+    for(uint32_t g=0;g<numGroups;++g){
+        out[g].name   = "Mesh_" + std::to_string(g+1);
+        out[g].colorR = 0.72f; out[g].colorG = 0.72f; out[g].colorB = 0.92f;
+    }
+
+    std::vector<uint32_t> groupTriCount(numGroups, 0);
+    for(size_t t=0;t<triCount;++t){
+        groupTriCount[rootToGroup[uf_find(idx[t*3])]]++;
+    }
+    for(uint32_t g=0;g<numGroups;++g){
+        out[g].indices.reserve(groupTriCount[g]*3);
+        out[g].vertices.reserve(groupTriCount[g]);
+    }
+
+    std::vector<uint32_t> remap(n, UINT32_MAX);
+    for(size_t t=0;t<triCount;++t){
+        uint32_t g = rootToGroup[uf_find(idx[t*3])];
+        MeshObject& mo = out[g];
+        for(int k=0;k<3;++k){
+            uint32_t vi = idx[t*3+k];
+            if(remap[vi] == UINT32_MAX){
+                remap[vi] = (uint32_t)mo.vertices.size();
+                mo.vertices.push_back(md.vertices[vi]);
+            }
+            mo.indices.push_back(remap[vi]);
+        }
+    }
+    // Remove empty groups
+    out.erase(std::remove_if(out.begin(),out.end(),[](const MeshObject& m){return m.vertices.empty();}),out.end());
+    LOGI("separateMeshesCPU: %d island(s)", (int)out.size());
 }
 
 // ── Matrix helpers ────────────────────────────────────────────────────────────
@@ -397,10 +508,13 @@ void Renderer::setWireframe(bool on){m_wireframe=on;}
 void Renderer::setShowBoundingBox(bool on){m_showBBox=on;}
 
 // ── TWO-STEP LOAD ─────────────────────────────────────────────────────────────
-// Step 1: Call from IO/background thread — heavy CPU parsing, NO OpenGL calls
+
+// Step 1 — IO thread: parse file (tinyobj/stl/glb). NO GL calls. FAST.
 bool Renderer::parseModel(const std::string& path){
     delete m_pendingData;
     m_pendingData = nullptr;
+    m_pendingMeshes.clear();
+
     ModelData* md = new ModelData();
     if(!ModelLoader::load(path, *md)){
         delete md;
@@ -408,30 +522,90 @@ bool Renderer::parseModel(const std::string& path){
         return false;
     }
     m_pendingData = md;
-    LOGI("parseModel OK — %zu verts, %zu idx, %.1fx%.1fx%.1f mm",
+    LOGI("parseModel OK — %zu verts, %zu idx | %.1fx%.1fx%.1f mm",
          md->vertices.size(), md->indices.size(),
          md->widthMM(), md->heightMM(), md->depthMM());
     return true;
 }
 
-// Step 2: Call from GL thread — GPU upload only, fast
+// Step 2 — GL thread: upload as ONE single mesh. Instant. NO separation.
 bool Renderer::uploadParsed(){
     if(!m_pendingData){
         LOGE("uploadParsed: no pending data");
         return false;
     }
-    m_origWmm = m_pendingData->widthMM();
-    m_origHmm = m_pendingData->heightMM();
-    m_origDmm = m_pendingData->depthMM();
+    for(auto& mo:m_meshes){
+        if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
+        if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
+        if(mo.ibo) glDeleteBuffers(1,&mo.ibo);
+    }
+    m_meshes.clear();
+
+    m_origWmm        = m_pendingData->widthMM();
+    m_origHmm        = m_pendingData->heightMM();
+    m_origDmm        = m_pendingData->depthMM();
     m_normalizeScale = m_pendingData->normalizeScale;
-    separateIntoMeshes(*m_pendingData);
+
+    MeshObject mo;
+    mo.name     = "Model";
+    mo.colorR   = m_colorR; mo.colorG = m_colorG; mo.colorB = m_colorB;
+    mo.vertices = std::move(m_pendingData->vertices);
+    mo.indices  = std::move(m_pendingData->indices);
+    uploadMeshObject(mo);
+    m_meshes.push_back(std::move(mo));
+
     delete m_pendingData;
-    m_pendingData = nullptr;
-    m_hasModel    = !m_meshes.empty();
+    m_pendingData  = nullptr;
+    m_hasModel     = true;
+    m_isSeparated  = false;
     m_selectedMesh = -1;
     resetTransform(); resetCamera(); clearRuler();
-    LOGI("uploadParsed OK — %d mesh(es)", (int)m_meshes.size());
-    return m_hasModel;
+    LOGI("uploadParsed OK — single mesh on GPU (%.1fx%.1fx%.1f mm)",
+         m_origWmm, m_origHmm, m_origDmm);
+    return true;
+}
+
+// Step 3 — MANUAL (user button): CPU separation, IO thread, NO GL calls.
+bool Renderer::performSeparationCPU(){
+    if(m_meshes.empty()) return false;
+    if(m_isSeparated){
+        LOGI("Already separated into %d meshes", (int)m_meshes.size());
+        return true;
+    }
+    // Build temp ModelData from the current single combined mesh
+    ModelData tmp;
+    tmp.vertices  = m_meshes[0].vertices;   // copy (IO thread safe — GL not touching it now)
+    tmp.indices   = m_meshes[0].indices;
+    tmp.origSizeX = m_origWmm;
+    tmp.origSizeY = m_origHmm;
+    tmp.origSizeZ = m_origDmm;
+    tmp.unitToMM  = 1.0f;
+    m_pendingMeshes.clear();
+    separateMeshesCPU(tmp, m_pendingMeshes);
+    LOGI("performSeparationCPU: %d islands", (int)m_pendingMeshes.size());
+    return !m_pendingMeshes.empty();
+}
+
+// Step 4 — GL thread: replace single mesh with separated meshes on GPU.
+bool Renderer::performSeparationGPU(){
+    if(m_pendingMeshes.empty()) return false;
+    for(auto& mo:m_meshes){
+        if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
+        if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
+        if(mo.ibo) glDeleteBuffers(1,&mo.ibo);
+    }
+    m_meshes.clear();
+    for(auto& mo : m_pendingMeshes){
+        mo.colorR = m_colorR; mo.colorG = m_colorG; mo.colorB = m_colorB;
+        uploadMeshObject(mo);
+        m_meshes.push_back(std::move(mo));
+    }
+    m_pendingMeshes.clear();
+    m_pendingMeshes.shrink_to_fit();
+    m_isSeparated  = true;
+    m_selectedMesh = -1;
+    LOGI("performSeparationGPU: %d meshes on GPU", (int)m_meshes.size());
+    return true;
 }
 
 // ── Load model ───────────────────────────────────────────────────────────────

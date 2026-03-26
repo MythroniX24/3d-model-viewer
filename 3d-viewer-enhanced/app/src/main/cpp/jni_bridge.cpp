@@ -137,6 +137,20 @@ JNIEXPORT jbyteArray JNICALL Java_com_modelviewer3d_NativeLib_nativeTakeScreensh
     env->SetByteArrayRegion(arr,0,(jsize)px.size(),reinterpret_cast<const jbyte*>(px.data()));
     return arr;
 }
+
+// Manual mesh separation (called by user via button)
+JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativePerformSeparationCPU(JNIEnv*,jclass){
+    if(!g_renderer) return JNI_FALSE;
+    return g_renderer->performSeparationCPU() ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativePerformSeparationGPU(JNIEnv*,jclass){
+    if(!g_renderer) return JNI_FALSE;
+    return g_renderer->performSeparationGPU() ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeIsSeparated(JNIEnv*,jclass){
+    if(!g_renderer) return JNI_FALSE;
+    return g_renderer->isSeparated() ? JNI_TRUE : JNI_FALSE;
+}
 // New functions — mesh visibility read + vertex count
 JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeGetMeshVisible(JNIEnv*,jclass,jint idx){
     if(!g_renderer) return JNI_TRUE;

@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_deepest">
+
+    <!-- Full-screen GL Surface -->
+    <com.modelviewer3d.ModelGLSurfaceView
+        android:id="@+id/glSurface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"/>
+
+    <!-- ══ TOP TOOLBAR ═══════════════════════════════════════════════════════ -->
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:background="@drawable/bg_toolbar"
+        android:elevation="8dp">
+
+        <!-- Logo section -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="6dp"
+            android:paddingEnd="8dp">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="3D"
+                android:textColor="@color/accent_cyan"
+                android:textSize="17sp"
+                android:textStyle="bold"
+                android:fontFamily="monospace"/>
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Studio"
+                android:textColor="#50FFFFFF"
+                android:textSize="11sp"
+                android:paddingStart="3dp"/>
+        </LinearLayout>
+
+        <View android:layout_width="1dp" android:layout_height="28dp"
+            android:background="#20FFFFFF" android:layout_marginEnd="4dp"/>
+
+        <!-- Left tools -->
+        <ImageButton android:id="@+id/btnOpen"
+            style="@style/ToolbarBtnAccent"
+            android:src="@drawable/ic_folder"
+            android:contentDescription="Open Model"/>
+
+        <ImageButton android:id="@+id/btnEdit"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_tune"
+            android:contentDescription="Editor"/>
+
+        <ImageButton android:id="@+id/btnMeshList"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_layers"
+            android:contentDescription="Mesh Separation"/>
+
+        <ImageButton android:id="@+id/btnRuler"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_ruler"
+            android:alpha="0.45"
+            android:contentDescription="Ruler"/>
+
+        <ImageButton android:id="@+id/btnExport"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_export"
+            android:contentDescription="Export"/>
+
+        <Space android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1"/>
+
+        <!-- Right tools -->
+        <ImageButton android:id="@+id/btnUndo"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_undo"
+            android:contentDescription="Undo"/>
+
+        <ImageButton android:id="@+id/btnRedo"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_redo"
+            android:contentDescription="Redo"/>
+
+        <ImageButton android:id="@+id/btnScreenshot"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_screenshot"
+            android:contentDescription="Screenshot"/>
+
+        <ImageButton android:id="@+id/btnReset"
+            style="@style/ToolbarBtn"
+            android:src="@drawable/ic_reset"
+            android:contentDescription="Reset Camera"/>
+
+        <!-- FPS badge -->
+        <TextView
+            android:id="@+id/tvFps"
+            android:layout_width="36dp"
+            android:layout_height="wrap_content"
+            android:text="--"
+            android:textColor="#4000D4FF"
+            android:textSize="9sp"
+            android:fontFamily="monospace"
+            android:gravity="center"/>
+    </LinearLayout>
+
+    <!-- ══ MODEL STATUS BAR (bottom) ═══════════════════════════════════════ -->
+    <LinearLayout
+        android:id="@+id/statusBar"
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:layout_gravity="bottom"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:background="@drawable/bg_status_bar"
+        android:elevation="6dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tvStatusMeshes"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="● 0 meshes"
+            android:textColor="@color/accent_cyan"
+            android:textSize="10sp"
+            android:fontFamily="monospace"/>
+
+        <View android:layout_width="1dp" android:layout_height="14dp"
+            android:background="#30FFFFFF" android:layout_marginStart="12dp" android:layout_marginEnd="12dp"/>
+
+        <TextView
+            android:id="@+id/tvStatusVerts"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="0 vertices"
+            android:textColor="@color/text_secondary"
+            android:textSize="10sp"
+            android:fontFamily="monospace"/>
+
+        <TextView
+            android:id="@+id/tvStatusFile"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textColor="@color/text_hint"
+            android:textSize="10sp"
+            android:singleLine="true"
+            android:ellipsize="end"
+            android:maxWidth="150dp"/>
+    </LinearLayout>
+
+    <!-- ══ CENTER HINT ══════════════════════════════════════════════════════ -->
+    <LinearLayout
+        android:id="@+id/tvHint"
+        android:layout_width="260dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="32dp"
+        android:background="@drawable/bg_hint_card">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📦"
+            android:textSize="48sp"
+            android:gravity="center"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="3D Studio"
+            android:textColor="@color/text_primary"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:paddingTop="10dp"
+            android:fontFamily="monospace"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Open a 3D model to begin"
+            android:textColor="@color/text_secondary"
+            android:textSize="12sp"
+            android:gravity="center"
+            android:paddingTop="4dp"/>
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:paddingTop="12dp">
+
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="OBJ" android:textColor="@color/accent_cyan"
+                android:background="@drawable/bg_pill" android:textSize="10sp"
+                android:paddingStart="10dp" android:paddingEnd="10dp"
+                android:paddingTop="4dp" android:paddingBottom="4dp"
+                android:layout_marginEnd="6dp"/>
+
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="STL" android:textColor="@color/accent_cyan"
+                android:background="@drawable/bg_pill" android:textSize="10sp"
+                android:paddingStart="10dp" android:paddingEnd="10dp"
+                android:paddingTop="4dp" android:paddingBottom="4dp"
+                android:layout_marginEnd="6dp"/>
+
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="GLB" android:textColor="@color/accent_cyan"
+                android:background="@drawable/bg_pill" android:textSize="10sp"
+                android:paddingStart="10dp" android:paddingEnd="10dp"
+                android:paddingTop="4dp" android:paddingBottom="4dp"/>
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Tap 📂 to open"
+            android:textColor="@color/text_hint"
+            android:textSize="11sp"
+            android:gravity="center"
+            android:paddingTop="14dp"/>
+    </LinearLayout>
+
+    <!-- ══ RULER OVERLAY ════════════════════════════════════════════════════ -->
+    <LinearLayout
+        android:id="@+id/rulerOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="52dp"
+        android:layout_gravity="bottom|start"
+        android:layout_marginBottom="36dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="12dp"
+        android:background="#EE091525"
+        android:visibility="gone"
+        android:elevation="6dp">
+
+        <TextView android:text="📐" android:textSize="18sp"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:paddingEnd="10dp"/>
+
+        <TextView
+            android:id="@+id/tvRulerInfo"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Tap mesh surface — Point 1"
+            android:textColor="@color/text_primary"
+            android:textSize="13sp"/>
+
+        <Button
+            android:id="@+id/btnClearRuler"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:text="Clear"
+            android:textSize="11sp"
+            android:textColor="@color/accent_cyan"
+            android:background="@drawable/bg_btn_accent"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"/>
+    </LinearLayout>
+
+    <!-- ══ LOADING OVERLAY ══════════════════════════════════════════════════ -->
+    <FrameLayout
+        android:id="@+id/loadingOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#CC000008"
+        android:visibility="gone"
+        android:elevation="10dp">
+
+        <LinearLayout
+            android:layout_width="200dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@drawable/bg_hint_card"
+            android:padding="32dp">
+
+            <ProgressBar
+                android:layout_width="52dp"
+                android:layout_height="52dp"
+                android:indeterminate="true"
+                android:indeterminateTint="@color/accent_cyan"/>
+
+            <TextView
+                android:id="@+id/tvLoading"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Loading…"
+                android:textColor="@color/text_primary"
+                android:textSize="13sp"
+                android:gravity="center"
+                android:paddingTop="14dp"/>
+
+            <TextView
+                android:id="@+id/tvLoadingDetail"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="@color/text_hint"
+                android:textSize="10sp"
+                android:gravity="center"
+                android:paddingTop="4dp"/>
+        </LinearLayout>
+    </FrameLayout>
+
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

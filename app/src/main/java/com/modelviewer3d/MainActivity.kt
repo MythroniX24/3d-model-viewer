@@ -100,6 +100,9 @@ class MainActivity : AppCompatActivity() {
             findViewById<View>(R.id.btnReset).setOnClickListener      { glView.queueEvent { NativeLib.nativeResetCamera() } }
             findViewById<View?>(R.id.btnClearRuler)?.setOnClickListener { clearRuler() }
 
+            // Also wire the "Open Model" button inside the hint card
+            findViewById<android.view.View?>(R.id.btnOpenHint)?.setOnClickListener { requestOpenFile() }
+
             intent?.data?.let { openModelFromUri(it) }
         } catch (e: Exception) {
             toast("Init error: ${e.message}")

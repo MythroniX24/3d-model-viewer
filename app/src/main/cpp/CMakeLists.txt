@@ -31,6 +31,7 @@ add_library(
     renderer.cpp
     shader_utils.cpp
     model_loader.cpp
+    mesh_separator.cpp
 )
 
 # Include paths

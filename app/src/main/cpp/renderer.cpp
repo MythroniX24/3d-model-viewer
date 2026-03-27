@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "mesh_separator.h"
 #include "shader_utils.h"
 #include <android/log.h>
 #include <ctime>
@@ -9,7 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <numeric>
-#include <unordered_map>
+// unordered_map removed — using MeshSeparator now
 
 #define TAG "Renderer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG,__VA_ARGS__)
@@ -36,16 +37,38 @@ in vec3 vFragPos, vNormal;
 out vec4 fragColor;
 uniform vec3  uColor, uLightDir;
 uniform float uAmbient, uDiffuse;
-uniform int   uSelected;  // highlight selected mesh
+uniform int   uSelected;
+uniform vec3  uCamPos;
 void main(){
-    vec3 n   = normalize(vNormal);
-    float d  = max(dot(n,-uLightDir),0.0);
-    vec3 vd  = normalize(vec3(0.0,0.0,3.5)-vFragPos);
-    vec3 rd  = reflect(uLightDir,n);
-    float sp = pow(max(dot(vd,rd),0.0),32.0)*0.25;
-    vec3 c   = (uAmbient + uDiffuse*d)*uColor + sp;
-    if(uSelected==1) c = mix(c, vec3(0.2,0.8,1.0), 0.35); // cyan tint
-    fragColor = vec4(clamp(c,0.0,1.0),1.0);
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCamPos - vFragPos);
+
+    // ── Key light (warm, top-left) ────────────────────────────────────────
+    vec3 L1  = normalize(vec3(-0.5, 1.0, 0.8));
+    float d1 = max(dot(N, L1), 0.0);
+    vec3 H1  = normalize(L1 + V);
+    float s1 = pow(max(dot(N, H1), 0.0), 48.0) * 0.5;
+    vec3 keyLight = (d1 * uColor + vec3(s1)) * vec3(1.0, 0.97, 0.90);
+
+    // ── Fill light (cool, right, softer) ──────────────────────────────────
+    vec3 L2  = normalize(vec3(0.8, 0.3, -0.4));
+    float d2 = max(dot(N, L2), 0.0) * 0.4;
+    vec3 fillLight = d2 * uColor * vec3(0.75, 0.85, 1.0);
+
+    // ── Rim / back light (bottom edge highlight) ──────────────────────────
+    vec3 L3    = normalize(vec3(0.0, -0.8, -1.0));
+    float rim  = pow(1.0 - max(dot(N, V), 0.0), 2.5) * 0.18;
+
+    // ── Combine ───────────────────────────────────────────────────────────
+    vec3 c = uAmbient * uColor
+           + uDiffuse * keyLight
+           + uDiffuse * 0.5 * fillLight
+           + rim * vec3(0.5, 0.7, 1.0);
+
+    // ── Selection highlight (cyan pulse) ──────────────────────────────────
+    if(uSelected == 1) c = mix(c, vec3(0.15, 0.85, 1.0), 0.4);
+
+    fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 })";
 
 static const char* kVertSimple = R"(#version 300 es
@@ -91,7 +114,7 @@ Renderer::~Renderer(){
 bool Renderer::init(int w,int h){
     m_width=w; m_height=h;
     glViewport(0,0,w,h);
-    glClearColor(0.09f,0.09f,0.12f,1.0f);
+    glClearColor(0.05f,0.05f,0.08f,1.0f);
     glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL);
     glEnable(GL_CULL_FACE);  glCullFace(GL_BACK);
 
@@ -155,178 +178,65 @@ void Renderer::uploadMeshObject(MeshObject& mo){
     mo.gpuReady=true;
 }
 
-// ── Mesh Separation (Union-Find on shared edges) ─────────────────────────────
-// ── FAST: runs on IO thread, NO OpenGL calls ─────────────────────────────────
-// Uses flat-array remap (O(1)) instead of unordered_map, iterative UF, reserve().
+// ── separateIntoMeshes — GL thread version (used by legacy loadModel) ─────────
+// Uses production MeshSeparator then uploads to GPU.
 void Renderer::separateIntoMeshes(const ModelData& md){
-    // Free old GPU objects (safe — called from GL thread via uploadParsed,
-    // or from loadModel which is already on GL thread)
     for(auto& mo:m_meshes){
         if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
         if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
         if(mo.ibo) glDeleteBuffers(1,&mo.ibo);
     }
     m_meshes.clear();
+    if(md.vertices.empty() || md.indices.empty()) return;
 
-    size_t n        = md.vertices.size();
-    size_t triCount = md.indices.size() / 3;
-    if(n == 0 || triCount == 0) return;
+    std::vector<MeshComponent> components;
+    m_separator.separate(
+        md.vertices.data(), (uint32_t)md.vertices.size(),
+        md.indices.data(),  (uint32_t)(md.indices.size()/3),
+        components);
 
-    // ── Union-Find (iterative, path-halving, no std::function overhead) ──────
-    std::vector<uint32_t> parent(n);
-    std::vector<uint8_t>  rank(n, 0);
-    for(uint32_t i=0;i<(uint32_t)n;++i) parent[i]=i;
-
-    // Inline iterative find with path halving
-    auto uf_find = [&](uint32_t x) -> uint32_t {
-        while(parent[x] != x){ parent[x]=parent[parent[x]]; x=parent[x]; }
-        return x;
-    };
-    auto uf_union = [&](uint32_t a, uint32_t b){
-        a=uf_find(a); b=uf_find(b);
-        if(a==b) return;
-        if(rank[a]<rank[b]) std::swap(a,b);
-        parent[b]=a;
-        if(rank[a]==rank[b]) ++rank[a];
-    };
-
-    // Union all 3 vertices of each triangle
-    const auto* idx = md.indices.data();
-    for(size_t t=0;t<triCount;++t){
-        uf_union(idx[t*3+0], idx[t*3+1]);
-        uf_union(idx[t*3+1], idx[t*3+2]);
-    }
-
-    // ── Map each root → compact group ID ─────────────────────────────────────
-    std::unordered_map<uint32_t,uint32_t> rootToGroup;
-    rootToGroup.reserve(64); // most models have few islands
-    uint32_t numGroups = 0;
-    for(uint32_t i=0;i<(uint32_t)n;++i){
-        uint32_t root = uf_find(i);
-        if(rootToGroup.find(root)==rootToGroup.end())
-            rootToGroup[root] = numGroups++;
-    }
-
-    // ── Build per-group MeshObject using flat-array remap ─────────────────────
-    // remap[vi] = new local index within the mesh group (-1 = not yet added)
-    std::vector<MeshObject> meshes(numGroups);
-    for(uint32_t g=0;g<numGroups;++g){
-        meshes[g].name   = "Mesh_" + std::to_string(g+1);
-        meshes[g].colorR = m_colorR;
-        meshes[g].colorG = m_colorG;
-        meshes[g].colorB = m_colorB;
-    }
-
-    // Estimate per-mesh sizes to pre-reserve
-    std::vector<uint32_t> groupTriCount(numGroups, 0);
-    for(size_t t=0;t<triCount;++t){
-        uint32_t g = rootToGroup[uf_find(idx[t*3])];
-        groupTriCount[g]++;
-    }
-    for(uint32_t g=0;g<numGroups;++g){
-        meshes[g].indices.reserve(groupTriCount[g]*3);
-        meshes[g].vertices.reserve(groupTriCount[g]); // rough estimate
-    }
-
-    // Flat remap array — one entry per original vertex, reset between groups
-    // We use a "generation" trick so we never memset the whole array
-    std::vector<uint32_t> remap(n, UINT32_MAX);
-
-    // Single pass: assign triangles to groups and remap vertices inline
-    for(size_t t=0;t<triCount;++t){
-        uint32_t g = rootToGroup[uf_find(idx[t*3])];
-        MeshObject& mo = meshes[g];
-        for(int k=0;k<3;++k){
-            uint32_t vi = idx[t*3+k];
-            if(remap[vi] == UINT32_MAX){
-                remap[vi] = (uint32_t)mo.vertices.size();
-                mo.vertices.push_back(md.vertices[vi]);
-            }
-            mo.indices.push_back(remap[vi]);
-        }
-    }
-
-    // ── Upload to GPU and move into m_meshes ──────────────────────────────────
-    for(auto& mo : meshes){
-        if(mo.vertices.empty()) continue;
+    for(auto& comp : components){
+        if(comp.vertices.empty()) continue;
+        MeshObject mo;
+        mo.name    = "Mesh_" + std::to_string(m_meshes.size()+1);
+        mo.colorR  = m_colorR; mo.colorG = m_colorG; mo.colorB = m_colorB;
+        mo.vertices = std::move(comp.vertices);
+        mo.indices.resize(comp.indices.size());
+        std::copy(comp.indices.begin(), comp.indices.end(), mo.indices.begin());
         uploadMeshObject(mo);
         m_meshes.push_back(std::move(mo));
     }
-
-    LOGI("separateIntoMeshes: %d island(s) from %zu verts / %zu tris",
-         (int)m_meshes.size(), n, triCount);
+    LOGI("separateIntoMeshes: %d islands", (int)m_meshes.size());
 }
 
-// ── CPU-only mesh separation — NO GL calls, safe on any thread ───────────────
-// Returns pre-built MeshObjects (no VAO/VBO yet). Called from parseModel (IO thread).
+// ── CPU mesh separation — uses production MeshSeparator (NO GL calls) ─────────
+// Replaces old vertex-based Union-Find. Now face-based with sort adjacency.
 void Renderer::separateMeshesCPU(const ModelData& md, std::vector<MeshObject>& out){
     out.clear();
-    size_t n        = md.vertices.size();
-    size_t triCount = md.indices.size() / 3;
-    if(n == 0 || triCount == 0) return;
+    if(md.vertices.empty() || md.indices.empty()) return;
 
-    std::vector<uint32_t> parent(n);
-    std::vector<uint8_t>  rank(n, 0);
-    for(uint32_t i=0;i<(uint32_t)n;++i) parent[i]=i;
+    const uint32_t triCount  = (uint32_t)(md.indices.size() / 3);
+    const uint32_t vertCount = (uint32_t)md.vertices.size();
 
-    auto uf_find = [&](uint32_t x) -> uint32_t {
-        while(parent[x]!=x){ parent[x]=parent[parent[x]]; x=parent[x]; }
-        return x;
-    };
-    auto uf_union = [&](uint32_t a, uint32_t b){
-        a=uf_find(a); b=uf_find(b);
-        if(a==b) return;
-        if(rank[a]<rank[b]) std::swap(a,b);
-        parent[b]=a;
-        if(rank[a]==rank[b]) ++rank[a];
-    };
+    // Reusable separator — buffers persist for lifetime of this Renderer instance
+    std::vector<MeshComponent> components;
+    m_separator.separate(
+        md.vertices.data(), vertCount,
+        md.indices.data(),  triCount,
+        components);
 
-    const auto* idx = md.indices.data();
-    for(size_t t=0;t<triCount;++t){
-        uf_union(idx[t*3+0], idx[t*3+1]);
-        uf_union(idx[t*3+1], idx[t*3+2]);
+    // Convert MeshComponent → MeshObject (add name, color; VAO/VBO filled later on GL thread)
+    out.resize(components.size());
+    for(size_t i = 0; i < components.size(); ++i){
+        MeshObject& mo = out[i];
+        mo.name    = "Mesh_" + std::to_string(i + 1);
+        mo.colorR  = m_colorR; mo.colorG = m_colorG; mo.colorB = m_colorB;
+        mo.vertices = std::move(components[i].vertices);
+        // MeshObject uses unsigned int, MeshComponent uses uint32_t — same on all ABIs
+        mo.indices.resize(components[i].indices.size());
+        std::copy(components[i].indices.begin(), components[i].indices.end(), mo.indices.begin());
     }
-
-    std::unordered_map<uint32_t,uint32_t> rootToGroup;
-    rootToGroup.reserve(64);
-    uint32_t numGroups = 0;
-    for(uint32_t i=0;i<(uint32_t)n;++i){
-        uint32_t root = uf_find(i);
-        if(rootToGroup.find(root)==rootToGroup.end())
-            rootToGroup[root] = numGroups++;
-    }
-
-    out.resize(numGroups);
-    for(uint32_t g=0;g<numGroups;++g){
-        out[g].name   = "Mesh_" + std::to_string(g+1);
-        out[g].colorR = 0.72f; out[g].colorG = 0.72f; out[g].colorB = 0.92f;
-    }
-
-    std::vector<uint32_t> groupTriCount(numGroups, 0);
-    for(size_t t=0;t<triCount;++t){
-        groupTriCount[rootToGroup[uf_find(idx[t*3])]]++;
-    }
-    for(uint32_t g=0;g<numGroups;++g){
-        out[g].indices.reserve(groupTriCount[g]*3);
-        out[g].vertices.reserve(groupTriCount[g]);
-    }
-
-    std::vector<uint32_t> remap(n, UINT32_MAX);
-    for(size_t t=0;t<triCount;++t){
-        uint32_t g = rootToGroup[uf_find(idx[t*3])];
-        MeshObject& mo = out[g];
-        for(int k=0;k<3;++k){
-            uint32_t vi = idx[t*3+k];
-            if(remap[vi] == UINT32_MAX){
-                remap[vi] = (uint32_t)mo.vertices.size();
-                mo.vertices.push_back(md.vertices[vi]);
-            }
-            mo.indices.push_back(remap[vi]);
-        }
-    }
-    // Remove empty groups
-    out.erase(std::remove_if(out.begin(),out.end(),[](const MeshObject& m){return m.vertices.empty();}),out.end());
-    LOGI("separateMeshesCPU: %d island(s)", (int)out.size());
+    LOGI("separateMeshesCPU: %d islands from %u tris", (int)out.size(), triCount);
 }
 
 // ── Matrix helpers ────────────────────────────────────────────────────────────
@@ -361,7 +271,8 @@ void Renderer::draw(){
     Vec3 eye=cameraEye();
     Mat4 view=Mat4::lookAt(eye,{m_panX,m_panY,0},{0,1,0});
     Mat4 global=buildGlobalMatrix();
-    Vec3 lightDir=Vec3{-0.4f,-1.0f,-0.3f}.normalized();
+    // lightDir still passed for legacy uLightDir uniform (not used in new shader)
+    Vec3 lightDir=Vec3{-0.5f, 1.0f, 0.8f}.normalized();
 
     for(auto& mo:m_meshes){
         if(!mo.visible||!mo.gpuReady) continue;
@@ -379,6 +290,7 @@ void Renderer::draw(){
         glUniform1f(glGetUniformLocation(m_mainProg,"uAmbient"),  m_ambient);
         glUniform1f(glGetUniformLocation(m_mainProg,"uDiffuse"),  m_diffuse);
         glUniform1i(glGetUniformLocation(m_mainProg,"uSelected"), mo.selected?1:0);
+        glUniform3f(glGetUniformLocation(m_mainProg,"uCamPos"),   eye.x,eye.y,eye.z);
 
         GLsizei ic=(GLsizei)mo.indices.size();
         if(m_wireframe){
@@ -472,17 +384,22 @@ void Renderer::updateFPS(){
 
 // ── Camera ───────────────────────────────────────────────────────────────────
 void Renderer::touchRotate(float dx,float dy){
-    m_camYaw+=dx*0.005f;
-    m_camPitch=std::clamp(m_camPitch+dy*0.005f,-PI*0.48f,PI*0.48f);
+    // Positive dx = finger moves right = model rotates right (yaw increases)
+    m_camYaw  -= dx * 0.006f;   // negate: drag right → rotate right around Y
+    m_camPitch = std::clamp(m_camPitch - dy * 0.006f, -PI*0.48f, PI*0.48f);
 }
 void Renderer::touchZoom(float f){
-    // f>1 = pinch open = zoom in = decrease distance
-    m_camDist=std::clamp(m_camDist/f,0.1f,50.0f);
+    // f > 1.0 = pinch open = zoom in (distance decreases)
+    // Clamp scaleFactor to avoid jumpy single-frame zoom
+    float sf = f < 0.85f ? 0.85f : (f > 1.18f ? 1.18f : f);
+    m_camDist = std::clamp(m_camDist / sf, 0.05f, 80.0f);
 }
 void Renderer::touchPan(float dx,float dy){
-    // dx>0 = finger right → model right → panX increases
-    float s=m_camDist/(float)std::max(m_height,1);
-    m_panX+=dx*s; m_panY-=dy*s;
+    // Screen dx/dy → world pan, scaled by camera distance so pan speed is
+    // proportional to how far the camera is (feels consistent at all zoom levels)
+    float s = m_camDist / (float)std::max(m_height, 1);
+    m_panX -= dx * s;   // negate: drag right → view moves right → model appears to go right
+    m_panY += dy * s;   // negate: drag down  → view moves down  → model appears to go down
 }
 void Renderer::resetCamera(){ m_camYaw=0.4f;m_camPitch=0.3f;m_camDist=3.5f;m_panX=0;m_panY=0; }
 

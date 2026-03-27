@@ -5,6 +5,7 @@
 #include <cstdint>
 #include "math_utils.h"
 #include "model_loader.h"
+#include "mesh_separator.h"
 
 struct TransformState {
     float rotX=0,rotY=0,rotZ=0;
@@ -148,4 +149,7 @@ private:
     struct Ray { Vec3 origin, dir; };
     Ray  screenToRay(float sx,float sy,float sw,float sh) const;
     bool rayTriangle(const Ray& r,const Vec3& v0,const Vec3& v1,const Vec3& v2,float& t) const;
+
+    // Production-grade mesh separator (reusable, preallocates buffers)
+    MeshSeparator m_separator;
 };

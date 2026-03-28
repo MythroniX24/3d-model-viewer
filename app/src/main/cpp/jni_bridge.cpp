@@ -3,6 +3,7 @@
 #include <memory>
 #include <cstring>
 #include "renderer.h"
+#include "mesh_separator.h"
 
 static std::unique_ptr<Renderer> g_renderer;
 
@@ -150,6 +151,11 @@ JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativePerformSeparat
 JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeIsSeparated(JNIEnv*,jclass){
     if(!g_renderer) return JNI_FALSE;
     return g_renderer->isSeparated() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Progress polling — Java calls this every ~500ms during separation
+JNIEXPORT jint JNICALL Java_com_modelviewer3d_NativeLib_nativeGetSeparationProgress(JNIEnv*,jclass){
+    return (jint)MeshSeparator::g_progress.load();
 }
 // New functions — mesh visibility read + vertex count
 JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeGetMeshVisible(JNIEnv*,jclass,jint idx){

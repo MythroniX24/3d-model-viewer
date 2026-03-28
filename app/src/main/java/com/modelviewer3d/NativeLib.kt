@@ -15,6 +15,7 @@ object NativeLib {
     external fun nativePerformSeparationCPU(): Boolean     // IO thread
     external fun nativePerformSeparationGPU(): Boolean     // GL thread
     external fun nativeIsSeparated(): Boolean
+    external fun nativeGetSeparationProgress(): Int  // 0-100
 
     // Camera
     external fun nativeTouchRotate(dx: Float, dy: Float)

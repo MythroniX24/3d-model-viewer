@@ -4,7 +4,6 @@ project("modelviewer")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ── Fetch third-party header-only libraries ──────────────────────────────────
 include(FetchContent)
 
 FetchContent_Declare(
@@ -23,7 +22,6 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(tinyobjloader tinygltf)
 
-# ── Main shared library ──────────────────────────────────────────────────────
 add_library(
     modelviewer
     SHARED
@@ -34,22 +32,16 @@ add_library(
     mesh_separator.cpp
 )
 
-# Include paths
 target_include_directories(modelviewer PRIVATE
     ${tinyobjloader_SOURCE_DIR}
     ${tinygltf_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# NOTE: TINYOBJLOADER_IMPLEMENTATION / TINYGLTF_IMPLEMENTATION / STB_IMAGE_IMPLEMENTATION
-# are defined locally in model_loader.cpp only (single-TU pattern).
-# Do NOT add them as global compile definitions — causes multiple-definition linker errors.
-
-# Android system libraries
-find_library(log-lib log)
+find_library(log-lib     log)
 find_library(android-lib android)
-find_library(gles3-lib GLESv3)
-find_library(egl-lib EGL)
+find_library(gles3-lib   GLESv3)
+find_library(egl-lib     EGL)
 
 target_link_libraries(modelviewer
     ${log-lib}
@@ -58,9 +50,11 @@ target_link_libraries(modelviewer
     ${egl-lib}
 )
 
-# Optimisation flags
+# Release-grade optimisation — critical for radix sort speed on mobile
 target_compile_options(modelviewer PRIVATE
-    -O2
-    -ffast-math
+    -O3                     # full optimisation (was -O2)
+    -ffast-math             # allows SIMD vectorisation of float ops
     -fvisibility=hidden
+    -march=armv8-a          # target ARMv8-A baseline (arm64-v8a)
+    -funroll-loops          # radix sort inner loops benefit from this
 )

@@ -10,6 +10,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.OpenableColumns
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
@@ -103,6 +105,14 @@ class MainActivity : AppCompatActivity() {
             // Also wire the "Open Model" button inside the hint card
             findViewById<android.view.View?>(R.id.btnOpenHint)?.setOnClickListener { requestOpenFile() }
 
+            // Register receiver for separation CPU-done signal (GPU upload needed on GL thread)
+            val sepFilter = IntentFilter(SeparationService.ACTION_SEPARATION_CPU_DONE)
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(separationCpuDoneReceiver, sepFilter, android.content.Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(separationCpuDoneReceiver, sepFilter)
+            }
+
             intent?.data?.let { openModelFromUri(it) }
         } catch (e: Exception) {
             toast("Init error: ${e.message}")
@@ -111,7 +121,32 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume()  { super.onResume();  glView.onResume()  }
     override fun onPause()   { super.onPause();   glView.onPause()   }
-    override fun onDestroy() { glView.queueEvent { NativeLib.nativeDestroy() }; super.onDestroy() }
+    override fun onDestroy() {
+        try { unregisterReceiver(separationCpuDoneReceiver) } catch (_: Exception) {}
+        glView.queueEvent { NativeLib.nativeDestroy() }
+        super.onDestroy()
+    }
+
+    // ── Separation GPU upload (triggered by SeparationService broadcast) ───────
+    private val separationCpuDoneReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
+            if (intent.action != SeparationService.ACTION_SEPARATION_CPU_DONE) return
+            // GPU upload must happen on GL thread
+            glView.queueEvent {
+                val ok = NativeLib.nativePerformSeparationGPU()
+                val mc = NativeLib.nativeGetMeshCount()
+                runOnUiThread {
+                    if (ok) {
+                        updateStatusBar()
+                        // Notify service that GPU upload is done
+                        sendBroadcast(android.content.Intent(SeparationService.ACTION_SEPARATION_COMPLETE))
+                    } else {
+                        sendBroadcast(android.content.Intent(SeparationService.ACTION_SEPARATION_FAILED))
+                    }
+                }
+            }
+        }
+    }
 
     // ── Status Bar ────────────────────────────────────────────────────────────
     fun updateStatusBar() {

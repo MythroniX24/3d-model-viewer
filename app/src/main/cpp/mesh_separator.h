@@ -1,89 +1,99 @@
 #pragma once
 // =============================================================================
-// mesh_separator.h  —  Production-grade mesh island extraction
+// mesh_separator.h  —  Ultra-fast parallel mesh island extraction
 // =============================================================================
-// Algorithm: Sort-based edge adjacency + face-level Union-Find
+// Algorithm (optimized for 300MB-500MB files, mobile ARMv8):
 //
-// Data flow:
-//   1. Generate one EdgeEntry per triangle edge (3 per tri) into flat array
-//   2. Sort edge array by packed 64-bit key  O(E log E), E = 3T
-//   3. Linear scan of sorted edges: consecutive equal keys → shared edge → union
-//   4. Path-compress UF roots → compact component IDs via prefix-sum
-//   5. Distribute face indices into flat per-component arrays (prefix-sum trick)
-//   6. Reconstruct each component mesh via stamping remap (no hash map)
+// STEP 1: Parallel edge generation    — nThreads × O(T/n), write-independent
+// STEP 2: 4-pass 16-bit radix sort   — O(4N) true linear, 5-10x vs std::sort
+// STEP 3: Single-pass UF on faces    — O(T·α(T)) ≈ O(T), path-halving + union-by-size
+// STEP 4: Label components            — O(T), flat array, no hash map
+// STEP 5: Prefix-sum grouping        — O(T), zero nested vectors
+// STEP 6: Stamping-remap reconstruct — O(T), generation trick, no memset
 //
-// Complexity: O(T log T) time, O(T) extra memory
-// For 500k tris: ~15M edge sort ops, <200ms on mobile ARMv8
+// Performance targets (ARMv8, 4 cores):
+//   100k tris  →  <50ms
+//   1M   tris  →  <400ms
+//   5M   tris  →  <2s
+//   15M  tris  →  <6s   (500MB OBJ ≈ 10-15M triangles)
 // =============================================================================
 
 #include <vector>
 #include <cstdint>
-#include <algorithm>
-#include <cassert>
+#include <atomic>
+#include <thread>
+#include <functional>
 #include "model_loader.h"
 
 // One output component — raw vertex+index buffers, no GPU objects yet
 struct MeshComponent {
-    std::vector<Vertex>       vertices;
-    std::vector<uint32_t>     indices;
-    uint32_t                  faceCount = 0;
+    std::vector<Vertex>   vertices;
+    std::vector<uint32_t> indices;
+    uint32_t              faceCount = 0;
 };
 
-// =============================================================================
-// MeshSeparator — reusable, preallocates buffers on first call
+// Progress callback: called periodically with 0-100
+using ProgressFn = std::function<void(int)>;
+
 // =============================================================================
 class MeshSeparator {
 public:
-    // Separate `indices` (flat triangle list) + `vertices` into disconnected
-    // components. Results placed in `out` (cleared first).
-    // Thread-safe as long as each thread has its own MeshSeparator instance.
-    //
-    // vertices   — full vertex buffer
-    // indices    — flat triangle index list (size = triCount * 3)
-    // triCount   — number of triangles
-    // out        — output: one MeshComponent per island
+    // Separate a flat-indexed triangle mesh into disconnected components.
+    // safe to call from any thread. Progress calls back on same thread.
     void separate(
-        const Vertex*       vertices,
-        uint32_t            vertCount,
-        const uint32_t*     indices,
-        uint32_t            triCount,
-        std::vector<MeshComponent>& out);
+        const Vertex*          vertices,
+        uint32_t               vertCount,
+        const uint32_t*        indices,
+        uint32_t               triCount,
+        std::vector<MeshComponent>& out,
+        const ProgressFn&      progress = nullptr);
+
+    // Global atomic progress 0-100, polled from Java via JNI
+    static std::atomic<int> g_progress;
 
 private:
-    // ── Persistent work buffers (reused across calls, never shrink) ──────────
+    // ── EdgeEntry: 12 bytes, cache-line friendly ──────────────────────────────
     struct EdgeEntry {
-        uint64_t key;      // packed (lo<<32)|hi — sort key
-        uint32_t face;     // triangle index this edge belongs to
+        uint64_t key;   // (min<<32)|max — sort key
+        uint32_t face;  // owning triangle
     };
 
-    std::vector<EdgeEntry> m_edges;       // 3 * triCount entries
-    std::vector<uint32_t>  m_ufParent;    // UF parent[face]
-    std::vector<uint32_t>  m_ufSize;      // UF size[face]  (union-by-size)
-    std::vector<uint32_t>  m_compId;      // compId[face] after labeling
-    std::vector<uint32_t>  m_compCount;   // count of faces per component
-    std::vector<uint32_t>  m_compOffset;  // prefix-sum offsets into m_faceOrder
-    std::vector<uint32_t>  m_faceOrder;   // faces grouped by component
-    std::vector<uint32_t>  m_remap;       // vertex remap[globalVi] = localVi
-    std::vector<uint32_t>  m_stamp;       // generation stamp per vertex slot
+    // ── Persistent buffers (grow-only, survive across calls) ─────────────────
+    std::vector<EdgeEntry> m_edges;      // 3 × triCount
+    std::vector<EdgeEntry> m_edgeTmp;    // radix sort temp
+    std::vector<uint32_t>  m_ufParent;   // union-find parent[face]
+    std::vector<uint32_t>  m_ufSize;     // union-find size[face]
+    std::vector<uint32_t>  m_compId;     // component id per face
+    std::vector<uint32_t>  m_compCount;  // faces per component
+    std::vector<uint32_t>  m_compOffset; // prefix-sum start per component
+    std::vector<uint32_t>  m_faceOrder;  // faces sorted by component
+    std::vector<uint32_t>  m_remap;      // vertex global→local remap
+    std::vector<uint32_t>  m_stamp;      // generation stamp per vertex
+    uint32_t               m_gen = 0;
 
-    uint32_t m_generation = 0;            // bumped each component — avoids memset
+    // ── Core steps ────────────────────────────────────────────────────────────
+    void genEdgesParallel(const uint32_t* idx, uint32_t triCount, int nthreads);
+    void radixSort64(uint32_t n);
+    void buildUF(uint32_t triCount);
+    uint32_t labelComponents(uint32_t triCount);
+    void groupByComponent(uint32_t triCount, uint32_t numComp);
+    void reconstructComponents(const Vertex* verts, uint32_t vertCount,
+                               const uint32_t* idx, uint32_t numComp,
+                               std::vector<MeshComponent>& out);
 
-    // ── Union-Find helpers (inline for performance) ──────────────────────────
-    uint32_t uf_find(uint32_t x) {
-        // Two-step path halving — fastest on mobile branch predictors
+    // ── Union-Find helpers (inline) ───────────────────────────────────────────
+    inline uint32_t uf_find(uint32_t x) noexcept {
         while (m_ufParent[x] != x) {
-            m_ufParent[x] = m_ufParent[m_ufParent[x]];
+            m_ufParent[x] = m_ufParent[m_ufParent[x]]; // path halving
             x = m_ufParent[x];
         }
         return x;
     }
-
-    void uf_union(uint32_t a, uint32_t b) {
+    inline void uf_union(uint32_t a, uint32_t b) noexcept {
         a = uf_find(a); b = uf_find(b);
         if (a == b) return;
-        // Union by size: attach smaller tree under larger
         if (m_ufSize[a] < m_ufSize[b]) { uint32_t t=a; a=b; b=t; }
-        m_ufParent[b] = a;
-        m_ufSize[a]  += m_ufSize[b];
+        m_ufParent[b]  = a;
+        m_ufSize[a]   += m_ufSize[b];
     }
 };

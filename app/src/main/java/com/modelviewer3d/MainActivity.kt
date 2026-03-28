@@ -42,7 +42,7 @@ class MainActivity : AppCompatActivity() {
     private var tvLoadingDetail: TextView? = null
     private var rulerOverlay: View? = null
     private var tvRulerInfo: TextView? = null
-    private var btnRuler: ImageButton? = null
+    private var btnRuler: View? = null
     private var statusBar: View? = null
     private var tvStatusMeshes: TextView? = null
     private var tvStatusVerts: TextView? = null

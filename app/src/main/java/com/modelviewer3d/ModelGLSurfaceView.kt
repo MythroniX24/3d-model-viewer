@@ -73,14 +73,45 @@ class ModelGLSurfaceView @JvmOverloads constructor(
 
     init {
         setEGLContextClientVersion(3)
-        setEGLConfigChooser(8, 8, 8, 8, 16, 0)
+        // Request 4x MSAA for smoother model edges; falls back to 2x or 0x if unavailable
+        setEGLConfigChooser(EGLConfigChooser4xMSAA())
         preserveEGLContextOnPause = true
+    }
+
+    // Custom EGL config chooser that requests 4x MSAA with fallback
+    private inner class EGLConfigChooser4xMSAA : android.opengl.GLSurfaceView.EGLConfigChooser {
+        override fun chooseConfig(egl: javax.microedition.khronos.egl.EGL10,
+                                  display: javax.microedition.khronos.egl.EGLDisplay)
+            : javax.microedition.khronos.egl.EGLConfig {
+            for (samples in intArrayOf(4, 2, 0)) {
+                val attribs = if (samples > 0) intArrayOf(
+                    egl.EGL_RED_SIZE, 8, egl.EGL_GREEN_SIZE, 8, egl.EGL_BLUE_SIZE, 8,
+                    egl.EGL_ALPHA_SIZE, 8, egl.EGL_DEPTH_SIZE, 16,
+                    0x3031 /*EGL_SAMPLES*/, samples, 0x3032 /*EGL_SAMPLE_BUFFERS*/, 1,
+                    egl.EGL_NONE) else intArrayOf(
+                    egl.EGL_RED_SIZE, 8, egl.EGL_GREEN_SIZE, 8, egl.EGL_BLUE_SIZE, 8,
+                    egl.EGL_ALPHA_SIZE, 8, egl.EGL_DEPTH_SIZE, 16, egl.EGL_NONE)
+                val configs = arrayOfNulls<javax.microedition.khronos.egl.EGLConfig>(1)
+                val count = IntArray(1)
+                if (egl.eglChooseConfig(display, attribs, configs, 1, count) && count[0] > 0)
+                    return configs[0]!!
+            }
+            // Absolute fallback — no antialiasing
+            val fb = intArrayOf(egl.EGL_RED_SIZE,5,egl.EGL_GREEN_SIZE,6,egl.EGL_BLUE_SIZE,5,egl.EGL_DEPTH_SIZE,16,egl.EGL_NONE)
+            val c2 = arrayOfNulls<javax.microedition.khronos.egl.EGLConfig>(1); val n2 = IntArray(1)
+            egl.eglChooseConfig(display, fb, c2, 1, n2)
+            return c2[0]!!
+        }
     }
 
     fun attachRenderer(renderer: ModelRenderer) {
         setRenderer(renderer)
+        // CONTINUOUSLY for smooth 60fps rotation; switch to WHEN_DIRTY when idle
         renderMode = RENDERMODE_CONTINUOUSLY
     }
+
+    /** Call from UI thread to force a single redraw (e.g. after transform changes) */
+    fun requestRedraw() { requestRender() }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         scaleDetector.onTouchEvent(event)

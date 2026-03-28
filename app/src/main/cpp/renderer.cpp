@@ -32,43 +32,56 @@ void main(){
 })";
 
 static const char* kFragPhong = R"(#version 300 es
-precision mediump float;
+precision highp float;
 in vec3 vFragPos, vNormal;
 out vec4 fragColor;
 uniform vec3  uColor, uLightDir;
 uniform float uAmbient, uDiffuse;
 uniform int   uSelected;
 uniform vec3  uCamPos;
+
+// Reinhard tonemapping — keeps bright areas from blowing out
+vec3 tonemap(vec3 c){ return c / (c + vec3(1.0)); }
+
 void main(){
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uCamPos - vFragPos);
 
-    // ── Key light (warm, top-left) ────────────────────────────────────────
-    vec3 L1  = normalize(vec3(-0.5, 1.0, 0.8));
+    // Key light: warm white, upper-left-front
+    vec3 L1  = normalize(vec3(-0.5, 1.2, 1.0));
     float d1 = max(dot(N, L1), 0.0);
     vec3 H1  = normalize(L1 + V);
-    float s1 = pow(max(dot(N, H1), 0.0), 48.0) * 0.5;
-    vec3 keyLight = (d1 * uColor + vec3(s1)) * vec3(1.0, 0.97, 0.90);
+    float s1 = pow(max(dot(N, H1), 0.0), 64.0) * 0.6;
 
-    // ── Fill light (cool, right, softer) ──────────────────────────────────
-    vec3 L2  = normalize(vec3(0.8, 0.3, -0.4));
-    float d2 = max(dot(N, L2), 0.0) * 0.4;
-    vec3 fillLight = d2 * uColor * vec3(0.75, 0.85, 1.0);
+    // Fill light: cool blue, right side
+    vec3 L2  = normalize(vec3(1.0, 0.2, -0.3));
+    float d2 = max(dot(N, L2), 0.0) * 0.35;
 
-    // ── Rim / back light (bottom edge highlight) ──────────────────────────
-    vec3 L3    = normalize(vec3(0.0, -0.8, -1.0));
-    float rim  = pow(1.0 - max(dot(N, V), 0.0), 2.5) * 0.18;
+    // Back/rim light: creates silhouette edge
+    float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.22;
 
-    // ── Combine ───────────────────────────────────────────────────────────
-    vec3 c = uAmbient * uColor
-           + uDiffuse * keyLight
-           + uDiffuse * 0.5 * fillLight
-           + rim * vec3(0.5, 0.7, 1.0);
+    // Ground bounce: subtle warm upwelling
+    float bounce = max(dot(N, vec3(0.0, -1.0, 0.0)), 0.0) * 0.08;
 
-    // ── Selection highlight (cyan pulse) ──────────────────────────────────
-    if(uSelected == 1) c = mix(c, vec3(0.15, 0.85, 1.0), 0.4);
+    vec3 keyContrib  = (d1 * uColor + vec3(s1 * 0.9, s1 * 0.95, s1)) * vec3(1.0, 0.97, 0.92);
+    vec3 fillContrib = d2 * uColor * vec3(0.7, 0.82, 1.0);
+    vec3 rimContrib  = rim * vec3(0.4, 0.65, 1.0);
+    vec3 ambContrib  = uAmbient * uColor;
+    vec3 bncContrib  = bounce * uColor * vec3(1.0, 0.9, 0.7);
 
-    fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+    vec3 c = ambContrib
+           + uDiffuse * keyContrib
+           + uDiffuse * fillContrib
+           + rimContrib
+           + bncContrib;
+
+    // Gamma correction (linear → sRGB)
+    c = tonemap(c);
+    c = pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+
+    if(uSelected == 1) c = mix(c, vec3(0.1, 0.9, 1.0), 0.35);
+
+    fragColor = vec4(c, 1.0);
 })";
 
 static const char* kVertSimple = R"(#version 300 es
@@ -145,6 +158,24 @@ void Renderer::buildShaders(){
     if(m_wireProg) glDeleteProgram(m_wireProg);
     m_mainProg=createProgram(kVertPhong,kFragPhong);
     m_wireProg=createProgram(kVertSimple,kFragSimple);
+    cacheUniformLocs();
+}
+
+void Renderer::cacheUniformLocs(){
+    // Cache all uniform locations once after shader compilation.
+    // glGetUniformLocation is slow — calling it 9x per mesh per frame kills FPS.
+    m_uloc.mvp      = glGetUniformLocation(m_mainProg, "uMVP");
+    m_uloc.model    = glGetUniformLocation(m_mainProg, "uModel");
+    m_uloc.norm     = glGetUniformLocation(m_mainProg, "uNorm");
+    m_uloc.color    = glGetUniformLocation(m_mainProg, "uColor");
+    m_uloc.lightDir = glGetUniformLocation(m_mainProg, "uLightDir");
+    m_uloc.ambient  = glGetUniformLocation(m_mainProg, "uAmbient");
+    m_uloc.diffuse  = glGetUniformLocation(m_mainProg, "uDiffuse");
+    m_uloc.selected = glGetUniformLocation(m_mainProg, "uSelected");
+    m_uloc.camPos   = glGetUniformLocation(m_mainProg, "uCamPos");
+    m_uloc.wireMvp  = glGetUniformLocation(m_wireProg,  "uMVP");
+    m_uloc.wireColor    = m_uloc.wireColor;
+    m_uloc.wirePointSize= m_uloc.wirePointSize;
 }
 
 // ── Bounding box ─────────────────────────────────────────────────────────────
@@ -282,28 +313,29 @@ void Renderer::draw(){
         float nm[9]; model.toNormalMatrix(nm);
 
         glUseProgram(m_mainProg);
-        glUniformMatrix4fv(glGetUniformLocation(m_mainProg,"uMVP"),  1,GL_FALSE,mvp.m);
-        glUniformMatrix4fv(glGetUniformLocation(m_mainProg,"uModel"),1,GL_FALSE,model.m);
-        glUniformMatrix3fv(glGetUniformLocation(m_mainProg,"uNorm"), 1,GL_FALSE,nm);
-        glUniform3f(glGetUniformLocation(m_mainProg,"uColor"),    mo.colorR,mo.colorG,mo.colorB);
-        glUniform3f(glGetUniformLocation(m_mainProg,"uLightDir"), lightDir.x,lightDir.y,lightDir.z);
-        glUniform1f(glGetUniformLocation(m_mainProg,"uAmbient"),  m_ambient);
-        glUniform1f(glGetUniformLocation(m_mainProg,"uDiffuse"),  m_diffuse);
-        glUniform1i(glGetUniformLocation(m_mainProg,"uSelected"), mo.selected?1:0);
-        glUniform3f(glGetUniformLocation(m_mainProg,"uCamPos"),   eye.x,eye.y,eye.z);
+        // Use cached locations — no more slow glGetUniformLocation in hot loop
+        glUniformMatrix4fv(m_uloc.mvp,      1, GL_FALSE, mvp.m);
+        glUniformMatrix4fv(m_uloc.model,    1, GL_FALSE, model.m);
+        glUniformMatrix3fv(m_uloc.norm,     1, GL_FALSE, nm);
+        glUniform3f(m_uloc.color,    mo.colorR, mo.colorG, mo.colorB);
+        glUniform3f(m_uloc.lightDir, lightDir.x, lightDir.y, lightDir.z);
+        glUniform1f(m_uloc.ambient,  m_ambient);
+        glUniform1f(m_uloc.diffuse,  m_diffuse);
+        glUniform1i(m_uloc.selected, mo.selected ? 1 : 0);
+        glUniform3f(m_uloc.camPos,   eye.x, eye.y, eye.z);
 
         GLsizei ic=(GLsizei)mo.indices.size();
         if(m_wireframe){
             glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1,1);
-            glUniform3f(glGetUniformLocation(m_mainProg,"uColor"),0.05f,0.05f,0.08f);
+            glUniform3f(m_uloc.color,0.05f,0.05f,0.08f);
             glBindVertexArray(mo.vao);
             glDrawElements(GL_TRIANGLES,ic,GL_UNSIGNED_INT,nullptr);
             glDisable(GL_POLYGON_OFFSET_FILL);
 
             glUseProgram(m_wireProg);
-            glUniformMatrix4fv(glGetUniformLocation(m_wireProg,"uMVP"),1,GL_FALSE,mvp.m);
-            glUniform4f(glGetUniformLocation(m_wireProg,"uColor"),0.2f,0.85f,1.0f,1.0f);
-            glUniform1f(glGetUniformLocation(m_wireProg,"uPointSize"),1.0f);
+            glUniformMatrix4fv(m_uloc.wireMvp, 1, GL_FALSE, mvp.m);
+            glUniform4f(m_uloc.wireColor,0.2f,0.85f,1.0f,1.0f);
+            glUniform1f(m_uloc.wirePointSize,1.0f);
             glLineWidth(1.2f);
             glDrawElements(GL_LINES,ic,GL_UNSIGNED_INT,nullptr);
             glBindVertexArray(0);
@@ -316,9 +348,9 @@ void Renderer::draw(){
         // Selected mesh bounding box overlay
         if(mo.selected && m_bbIndexCount>0){
             glUseProgram(m_wireProg);
-            glUniformMatrix4fv(glGetUniformLocation(m_wireProg,"uMVP"),1,GL_FALSE,mvp.m);
-            glUniform4f(glGetUniformLocation(m_wireProg,"uColor"),0.2f,0.9f,1.0f,1.0f);
-            glUniform1f(glGetUniformLocation(m_wireProg,"uPointSize"),1.0f);
+            glUniformMatrix4fv(m_uloc.wireMvp, 1, GL_FALSE, mvp.m);
+            glUniform4f(m_uloc.wireColor,0.2f,0.9f,1.0f,1.0f);
+            glUniform1f(m_uloc.wirePointSize,1.0f);
             glLineWidth(2.0f);
             glBindVertexArray(m_bbVao);
             glDrawElements(GL_LINES,m_bbIndexCount,GL_UNSIGNED_SHORT,nullptr);
@@ -330,9 +362,9 @@ void Renderer::draw(){
     if(m_showBBox && m_bbIndexCount>0){
         Mat4 mvp=proj*view*buildGlobalMatrix();
         glUseProgram(m_wireProg);
-        glUniformMatrix4fv(glGetUniformLocation(m_wireProg,"uMVP"),1,GL_FALSE,mvp.m);
-        glUniform4f(glGetUniformLocation(m_wireProg,"uColor"),1.0f,0.6f,0.1f,0.9f);
-        glUniform1f(glGetUniformLocation(m_wireProg,"uPointSize"),1.0f);
+        glUniformMatrix4fv(m_uloc.wireMvp,1,GL_FALSE,mvp.m);
+        glUniform4f(m_uloc.wireColor,1.0f,0.6f,0.1f,0.9f);
+        glUniform1f(m_uloc.wirePointSize,1.0f);
         glLineWidth(1.5f);
         glBindVertexArray(m_bbVao);
         glDrawElements(GL_LINES,m_bbIndexCount,GL_UNSIGNED_SHORT,nullptr);
@@ -343,7 +375,7 @@ void Renderer::draw(){
     if(m_rulerHasP1||m_rulerHasP2){
         Mat4 vp=proj*view;
         glUseProgram(m_wireProg);
-        glUniformMatrix4fv(glGetUniformLocation(m_wireProg,"uMVP"),1,GL_FALSE,vp.m);
+        glUniformMatrix4fv(m_uloc.wireMvp,1,GL_FALSE,vp.m);
         glDisable(GL_DEPTH_TEST);
 
         if(m_rulerHasP1&&m_rulerHasP2){
@@ -352,8 +384,8 @@ void Renderer::draw(){
             glBindBuffer(GL_ARRAY_BUFFER,m_rulerVbo);
             glBufferSubData(GL_ARRAY_BUFFER,0,sizeof(pts),pts);
             glBindVertexArray(m_rulerVao);
-            glUniform4f(glGetUniformLocation(m_wireProg,"uColor"),1.0f,1.0f,0.0f,1.0f);
-            glUniform1f(glGetUniformLocation(m_wireProg,"uPointSize"),1.0f);
+            glUniform4f(m_uloc.wireColor,1.0f,1.0f,0.0f,1.0f);
+            glUniform1f(m_uloc.wirePointSize,1.0f);
             glLineWidth(2.5f); glDrawArrays(GL_LINES,0,2);
             glBindVertexArray(0);
         }
@@ -364,8 +396,8 @@ void Renderer::draw(){
         glBindBuffer(GL_ARRAY_BUFFER,m_rulerVbo);
         glBufferSubData(GL_ARRAY_BUFFER,0,dotCount*12,dotPts);
         glBindVertexArray(m_rulerVao);
-        glUniform4f(glGetUniformLocation(m_wireProg,"uColor"),1.0f,0.3f,0.3f,1.0f);
-        glUniform1f(glGetUniformLocation(m_wireProg,"uPointSize"),14.0f);
+        glUniform4f(m_uloc.wireColor,1.0f,0.3f,0.3f,1.0f);
+        glUniform1f(m_uloc.wirePointSize,14.0f);
         glDrawArrays(GL_POINTS,0,dotCount);
         glBindVertexArray(0);
         glEnable(GL_DEPTH_TEST);

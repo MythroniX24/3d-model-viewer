@@ -103,6 +103,14 @@ private:
     GLuint m_rulerVao=0, m_rulerVbo=0;
     GLsizei m_bbIndexCount=0;
 
+    // Cached uniform locations — avoids glGetUniformLocation every frame
+    struct UniformLocs {
+        GLint mvp=-1, model=-1, norm=-1, color=-1, lightDir=-1;
+        GLint ambient=-1, diffuse=-1, selected=-1, camPos=-1;
+        GLint wireMvp=-1, wireColor=-1, wirePointSize=-1;
+    } m_uloc;
+    void cacheUniformLocs();
+
     std::vector<MeshObject> m_meshes;
     int  m_selectedMesh = -1;
     bool m_hasModel     = false;

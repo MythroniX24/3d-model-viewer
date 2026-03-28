@@ -79,7 +79,7 @@ private:
     void groupByComponent(uint32_t triCount, uint32_t numComp);
     void reconstructComponents(const Vertex* verts, uint32_t vertCount,
                                const uint32_t* idx, uint32_t numComp,
-                               std::vector<MeshComponent>& out);
+                               std::vector<MeshComponent>& out, int nthreads);
 
     // ── Union-Find helpers (inline) ───────────────────────────────────────────
     inline uint32_t uf_find(uint32_t x) noexcept {

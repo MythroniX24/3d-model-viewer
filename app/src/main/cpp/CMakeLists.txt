@@ -50,11 +50,23 @@ target_link_libraries(modelviewer
     ${egl-lib}
 )
 
-# Release-grade optimisation — critical for radix sort speed on mobile
+# ── Base flags for ALL ABIs ────────────────────────────────────────────────────
 target_compile_options(modelviewer PRIVATE
-    -O3                     # full optimisation (was -O2)
-    -ffast-math             # allows SIMD vectorisation of float ops
+    -O3
+    -ffast-math
     -fvisibility=hidden
-    -march=armv8-a          # target ARMv8-A baseline (arm64-v8a)
-    -funroll-loops          # radix sort inner loops benefit from this
+    -funroll-loops
 )
+
+# ── ABI-specific march flags ───────────────────────────────────────────────────
+# ANDROID_ABI is set by the Android Gradle plugin per-ABI build.
+# -march=armv8-a is ONLY valid for ARM targets, never for x86_64/x86.
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    target_compile_options(modelviewer PRIVATE -march=armv8-a)
+elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+    target_compile_options(modelviewer PRIVATE -march=armv7-a -mfpu=neon)
+elseif(ANDROID_ABI STREQUAL "x86_64")
+    target_compile_options(modelviewer PRIVATE -march=x86-64)
+elseif(ANDROID_ABI STREQUAL "x86")
+    target_compile_options(modelviewer PRIVATE -march=i686)
+endif()

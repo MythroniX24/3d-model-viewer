@@ -11,10 +11,9 @@ import kotlin.math.abs
 /**
  * Multi-touch GL surface — fixed touch controls:
  *   1-finger drag  → orbit (rotate)
- *   2-finger pinch → zoom  (scale detector)
+ *   2-finger pinch → zoom
  *   2-finger drag  → pan
  *   double-tap     → reset camera
- *   single-tap     → ruler pick (ruler mode only)
  */
 class ModelGLSurfaceView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
@@ -24,32 +23,23 @@ class ModelGLSurfaceView @JvmOverloads constructor(
     var mode: Mode = Mode.CAMERA
     var onRulerPick: ((FloatArray) -> Unit)? = null
 
-    // Last known positions
     private var lastX = 0f
     private var lastY = 0f
     private var lastMidX = 0f
     private var lastMidY = 0f
-
-    // Whether we are currently in a pan gesture vs rotate
     private var isScaling = false
-    private var isPanning = false
 
     private val scaleDetector = ScaleGestureDetector(context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScaleBegin(d: ScaleGestureDetector): Boolean {
-                isScaling = true
-                return true
+                isScaling = true; return true
             }
             override fun onScale(d: ScaleGestureDetector): Boolean {
-                if (mode == Mode.CAMERA) {
-                    // scaleFactor > 1 = fingers spread apart = zoom IN
+                if (mode == Mode.CAMERA)
                     queueEvent { NativeLib.nativeTouchZoom(d.scaleFactor) }
-                }
                 return true
             }
-            override fun onScaleEnd(d: ScaleGestureDetector) {
-                isScaling = false
-            }
+            override fun onScaleEnd(d: ScaleGestureDetector) { isScaling = false }
         })
 
     private val gestureDetector = GestureDetector(context,
@@ -73,45 +63,15 @@ class ModelGLSurfaceView @JvmOverloads constructor(
 
     init {
         setEGLContextClientVersion(3)
-        // Request 4x MSAA for smoother model edges; falls back to 2x or 0x if unavailable
-        setEGLConfigChooser(EGLConfigChooser4xMSAA())
+        // R8G8B8A8 + 16-bit depth — simple, works on all devices
+        setEGLConfigChooser(8, 8, 8, 8, 16, 0)
         preserveEGLContextOnPause = true
-    }
-
-    // Custom EGL config chooser that requests 4x MSAA with fallback
-    private inner class EGLConfigChooser4xMSAA : android.opengl.GLSurfaceView.EGLConfigChooser {
-        override fun chooseConfig(egl: javax.microedition.khronos.egl.EGL10,
-                                  display: javax.microedition.khronos.egl.EGLDisplay)
-            : javax.microedition.khronos.egl.EGLConfig {
-            for (samples in intArrayOf(4, 2, 0)) {
-                val attribs = if (samples > 0) intArrayOf(
-                    egl.EGL_RED_SIZE, 8, egl.EGL_GREEN_SIZE, 8, egl.EGL_BLUE_SIZE, 8,
-                    egl.EGL_ALPHA_SIZE, 8, egl.EGL_DEPTH_SIZE, 16,
-                    0x3031 /*EGL_SAMPLES*/, samples, 0x3032 /*EGL_SAMPLE_BUFFERS*/, 1,
-                    egl.EGL_NONE) else intArrayOf(
-                    egl.EGL_RED_SIZE, 8, egl.EGL_GREEN_SIZE, 8, egl.EGL_BLUE_SIZE, 8,
-                    egl.EGL_ALPHA_SIZE, 8, egl.EGL_DEPTH_SIZE, 16, egl.EGL_NONE)
-                val configs = arrayOfNulls<javax.microedition.khronos.egl.EGLConfig>(1)
-                val count = IntArray(1)
-                if (egl.eglChooseConfig(display, attribs, configs, 1, count) && count[0] > 0)
-                    return configs[0]!!
-            }
-            // Absolute fallback — no antialiasing
-            val fb = intArrayOf(egl.EGL_RED_SIZE,5,egl.EGL_GREEN_SIZE,6,egl.EGL_BLUE_SIZE,5,egl.EGL_DEPTH_SIZE,16,egl.EGL_NONE)
-            val c2 = arrayOfNulls<javax.microedition.khronos.egl.EGLConfig>(1); val n2 = IntArray(1)
-            egl.eglChooseConfig(display, fb, c2, 1, n2)
-            return c2[0]!!
-        }
     }
 
     fun attachRenderer(renderer: ModelRenderer) {
         setRenderer(renderer)
-        // CONTINUOUSLY for smooth 60fps rotation; switch to WHEN_DIRTY when idle
         renderMode = RENDERMODE_CONTINUOUSLY
     }
-
-    /** Call from UI thread to force a single redraw (e.g. after transform changes) */
-    fun requestRedraw() { requestRender() }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         scaleDetector.onTouchEvent(event)
@@ -124,51 +84,42 @@ class ModelGLSurfaceView @JvmOverloads constructor(
 
             MotionEvent.ACTION_DOWN -> {
                 lastX = event.x; lastY = event.y
-                isScaling = false; isPanning = false
+                isScaling = false
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
-                // Second finger down — switch to 2-finger mode
                 lastMidX = (event.getX(0) + event.getX(1)) * 0.5f
                 lastMidY = (event.getY(0) + event.getY(1)) * 0.5f
-                isPanning = true
             }
 
             MotionEvent.ACTION_MOVE -> {
                 when {
                     count == 1 && !isScaling -> {
-                        // 1-finger: rotate
                         val dx = event.x - lastX
                         val dy = event.y - lastY
-                        if (abs(dx) > 0.5f || abs(dy) > 0.5f) {
+                        if (abs(dx) > 0.5f || abs(dy) > 0.5f)
                             queueEvent { NativeLib.nativeTouchRotate(dx, dy) }
-                        }
                         lastX = event.x; lastY = event.y
                     }
                     count >= 2 && !isScaling -> {
-                        // 2-finger (non-pinch): pan
                         val mx = (event.getX(0) + event.getX(1)) * 0.5f
                         val my = (event.getY(0) + event.getY(1)) * 0.5f
-                        val dx = mx - lastMidX
-                        val dy = my - lastMidY
-                        if (abs(dx) > 0.3f || abs(dy) > 0.3f) {
+                        val dx = mx - lastMidX; val dy = my - lastMidY
+                        if (abs(dx) > 0.3f || abs(dy) > 0.3f)
                             queueEvent { NativeLib.nativeTouchPan(dx, dy) }
-                        }
                         lastMidX = mx; lastMidY = my
                     }
                 }
             }
 
             MotionEvent.ACTION_POINTER_UP -> {
-                // One finger lifted — reset to remaining finger position
-                val remainIdx = if (event.actionIndex == 0) 1 else 0
-                lastX = event.getX(remainIdx)
-                lastY = event.getY(remainIdx)
-                isPanning = false; isScaling = false
+                val rem = if (event.actionIndex == 0) 1 else 0
+                lastX = event.getX(rem); lastY = event.getY(rem)
+                isScaling = false
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                isPanning = false; isScaling = false
+                isScaling = false
             }
         }
         return true

@@ -185,11 +185,8 @@ class MeshListFragment : BottomSheetDialogFragment() {
         lifecycleScope.launch {
             // CPU work on IO thread (Union-Find)
             val cpuOk = withContext(Dispatchers.IO) {
-                var result = false
-                val latch = CountDownLatch(1)
-                // performSeparationCPU is safe on IO thread (no GL calls)
-                result = NativeLib.nativePerformSeparationCPU()
-                result
+                // performSeparationCPU: pure CPU, no GL calls, safe on IO thread
+                NativeLib.nativePerformSeparationCPU()
             }
             if (!cpuOk) {
                 toast("Separation failed or already done")

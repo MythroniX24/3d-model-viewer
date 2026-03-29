@@ -431,7 +431,7 @@ void Renderer::touchPan(float dx,float dy){
     // proportional to how far the camera is (feels consistent at all zoom levels)
     float s = m_camDist / (float)std::max(m_height, 1);
     m_panX -= dx * s;   // negate: drag right → view moves right → model appears to go right
-    m_panY += dy * s;   // negate: drag down  → view moves down  → model appears to go down
+    m_panY -= dy * s;   // Android Y grows DOWN, OpenGL Y grows UP → invert for correct pan
 }
 void Renderer::resetCamera(){ m_camYaw=0.4f;m_camPitch=0.3f;m_camDist=3.5f;m_panX=0;m_panY=0; }
 

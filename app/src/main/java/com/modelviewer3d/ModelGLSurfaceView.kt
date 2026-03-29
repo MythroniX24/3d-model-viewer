@@ -7,14 +7,8 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import kotlin.math.abs
+import kotlin.math.hypot
 
-/**
- * Multi-touch GL surface — fixed touch controls:
- *   1-finger drag  → orbit (rotate)
- *   2-finger pinch → zoom
- *   2-finger drag  → pan
- *   double-tap     → reset camera
- */
 class ModelGLSurfaceView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null
 ) : GLSurfaceView(context, attrs) {
@@ -23,23 +17,31 @@ class ModelGLSurfaceView @JvmOverloads constructor(
     var mode: Mode = Mode.CAMERA
     var onRulerPick: ((FloatArray) -> Unit)? = null
 
-    private var lastX = 0f
-    private var lastY = 0f
-    private var lastMidX = 0f
-    private var lastMidY = 0f
+    private var lastX  = 0f; private var lastY  = 0f
+    private var lastMidX = 0f; private var lastMidY = 0f
+    // Track whether scale gesture is actively running
     private var isScaling = false
 
     private val scaleDetector = ScaleGestureDetector(context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScaleBegin(d: ScaleGestureDetector): Boolean {
-                isScaling = true; return true
-            }
-            override fun onScale(d: ScaleGestureDetector): Boolean {
-                if (mode == Mode.CAMERA)
-                    queueEvent { NativeLib.nativeTouchZoom(d.scaleFactor) }
+                isScaling = true
+                // Reset mid so pan doesn't jump after zoom ends
+                lastMidX = d.focusX; lastMidY = d.focusY
                 return true
             }
-            override fun onScaleEnd(d: ScaleGestureDetector) { isScaling = false }
+            override fun onScale(d: ScaleGestureDetector): Boolean {
+                if (mode == Mode.CAMERA) {
+                    val sf = d.scaleFactor
+                    queueEvent { NativeLib.nativeTouchZoom(sf) }
+                }
+                return true
+            }
+            override fun onScaleEnd(d: ScaleGestureDetector) {
+                isScaling = false
+                // Resync mid position to current finger midpoint after zoom ends
+                lastMidX = d.focusX; lastMidY = d.focusY
+            }
         })
 
     private val gestureDetector = GestureDetector(context,
@@ -63,7 +65,6 @@ class ModelGLSurfaceView @JvmOverloads constructor(
 
     init {
         setEGLContextClientVersion(3)
-        // R8G8B8A8 + 16-bit depth — simple, works on all devices
         setEGLConfigChooser(8, 8, 8, 8, 16, 0)
         preserveEGLContextOnPause = true
     }
@@ -74,6 +75,7 @@ class ModelGLSurfaceView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Scale detector MUST get the event first — it sets isScaling
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
 
@@ -88,27 +90,30 @@ class ModelGLSurfaceView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
+                // Second finger arrived — sync midpoint, stop any 1-finger action
                 lastMidX = (event.getX(0) + event.getX(1)) * 0.5f
                 lastMidY = (event.getY(0) + event.getY(1)) * 0.5f
             }
 
-            MotionEvent.ACTION_MOVE -> {
-                when {
-                    count == 1 && !isScaling -> {
-                        val dx = event.x - lastX
-                        val dy = event.y - lastY
-                        if (abs(dx) > 0.5f || abs(dy) > 0.5f)
-                            queueEvent { NativeLib.nativeTouchRotate(dx, dy) }
-                        lastX = event.x; lastY = event.y
-                    }
-                    count >= 2 && !isScaling -> {
-                        val mx = (event.getX(0) + event.getX(1)) * 0.5f
-                        val my = (event.getY(0) + event.getY(1)) * 0.5f
-                        val dx = mx - lastMidX; val dy = my - lastMidY
-                        if (abs(dx) > 0.3f || abs(dy) > 0.3f)
-                            queueEvent { NativeLib.nativeTouchPan(dx, dy) }
-                        lastMidX = mx; lastMidY = my
-                    }
+            MotionEvent.ACTION_MOVE -> when {
+                // 1-finger rotate — only when truly single finger
+                count == 1 && !isScaling -> {
+                    val dx = event.x - lastX
+                    val dy = event.y - lastY
+                    if (abs(dx) > 0.4f || abs(dy) > 0.4f)
+                        queueEvent { NativeLib.nativeTouchRotate(dx, dy) }
+                    lastX = event.x; lastY = event.y
+                }
+                // 2-finger pan — only when NOT scaling (zoom has priority)
+                count >= 2 && !isScaling && !scaleDetector.isInProgress -> {
+                    val mx = (event.getX(0) + event.getX(1)) * 0.5f
+                    val my = (event.getY(0) + event.getY(1)) * 0.5f
+                    val dx = mx - lastMidX; val dy = my - lastMidY
+                    // Only pan if midpoint moved more than pinch distance change
+                    // (distinguishes pan from zoom)
+                    if (abs(dx) > 1f || abs(dy) > 1f)
+                        queueEvent { NativeLib.nativeTouchPan(dx, dy) }
+                    lastMidX = mx; lastMidY = my
                 }
             }
 

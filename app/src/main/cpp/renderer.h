@@ -129,6 +129,11 @@ private:
     ModelData*              m_pendingData  = nullptr;
     std::vector<MeshObject> m_pendingMeshes;  // used by performSeparation
 
+    // Raw vertex/index data kept alive for separation (safe to read from IO thread)
+    // Set in uploadParsed(), cleared after performSeparationGPU()
+    std::vector<Vertex>       m_rawVertices;
+    std::vector<unsigned int> m_rawIndices;
+
     float m_origWmm=1,m_origHmm=1,m_origDmm=1;
     float m_normalizeScale=1.0f;
 

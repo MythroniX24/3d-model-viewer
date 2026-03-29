@@ -495,6 +495,10 @@ bool Renderer::uploadParsed(){
     m_origDmm        = m_pendingData->depthMM();
     m_normalizeScale = m_pendingData->normalizeScale;
 
+    // Keep a copy for later separation (performSeparationCPU reads these on IO thread)
+    m_rawVertices = m_pendingData->vertices;   // copy before move
+    m_rawIndices  = m_pendingData->indices;    // copy before move
+
     MeshObject mo;
     mo.name     = "Model";
     mo.colorR   = m_colorR; mo.colorG = m_colorG; mo.colorB = m_colorB;
@@ -509,29 +513,38 @@ bool Renderer::uploadParsed(){
     m_isSeparated  = false;
     m_selectedMesh = -1;
     resetTransform(); resetCamera(); clearRuler();
-    LOGI("uploadParsed OK — single mesh on GPU (%.1fx%.1fx%.1f mm)",
+    LOGI("uploadParsed OK — %zu verts, %zu tris, %.1fx%.1fx%.1f mm",
+         m_rawVertices.size(), m_rawIndices.size()/3,
          m_origWmm, m_origHmm, m_origDmm);
     return true;
 }
 
 // Step 3 — MANUAL (user button): CPU separation, IO thread, NO GL calls.
 bool Renderer::performSeparationCPU(){
-    if(m_meshes.empty()) return false;
+    if(!m_hasModel) { LOGE("performSeparationCPU: no model loaded"); return false; }
     if(m_isSeparated){
         LOGI("Already separated into %d meshes", (int)m_meshes.size());
         return true;
     }
-    // Build temp ModelData from the current single combined mesh
+    if(m_rawVertices.empty() || m_rawIndices.empty()){
+        LOGE("performSeparationCPU: m_rawVertices/Indices empty — was uploadParsed called?");
+        return false;
+    }
+    LOGI("performSeparationCPU: separating %zu verts, %zu tris",
+         m_rawVertices.size(), m_rawIndices.size()/3);
+
+    // Use stored raw copy — safe to read on IO thread, GL thread only reads m_meshes[0]
+    // for drawing which is a separate MeshObject with its own VAO/VBO
     ModelData tmp;
-    tmp.vertices  = m_meshes[0].vertices;   // copy (IO thread safe — GL not touching it now)
-    tmp.indices   = m_meshes[0].indices;
+    tmp.vertices  = m_rawVertices;   // copy from safe storage (not from m_meshes[0])
+    tmp.indices = m_rawIndices;  // both are vector<unsigned int>
     tmp.origSizeX = m_origWmm;
     tmp.origSizeY = m_origHmm;
     tmp.origSizeZ = m_origDmm;
     tmp.unitToMM  = 1.0f;
     m_pendingMeshes.clear();
     separateMeshesCPU(tmp, m_pendingMeshes);
-    LOGI("performSeparationCPU: %d islands", (int)m_pendingMeshes.size());
+    LOGI("performSeparationCPU done: %d islands", (int)m_pendingMeshes.size());
     return !m_pendingMeshes.empty();
 }
 
@@ -551,6 +564,9 @@ bool Renderer::performSeparationGPU(){
     }
     m_pendingMeshes.clear();
     m_pendingMeshes.shrink_to_fit();
+    // Free the raw copy — no longer needed after separation
+    m_rawVertices.clear(); m_rawVertices.shrink_to_fit();
+    m_rawIndices.clear();  m_rawIndices.shrink_to_fit();
     m_isSeparated  = true;
     m_selectedMesh = -1;
     LOGI("performSeparationGPU: %d meshes on GPU", (int)m_meshes.size());

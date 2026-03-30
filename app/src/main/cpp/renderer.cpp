@@ -519,58 +519,53 @@ bool Renderer::uploadParsed(){
     return true;
 }
 
-// Step 3 — MANUAL (user button): CPU separation, IO thread, NO GL calls.
-bool Renderer::performSeparationCPU(){
-    if(!m_hasModel) { LOGE("performSeparationCPU: no model loaded"); return false; }
-    if(m_isSeparated){
-        LOGI("Already separated into %d meshes", (int)m_meshes.size());
-        return true;
-    }
-    if(m_rawVertices.empty() || m_rawIndices.empty()){
-        LOGE("performSeparationCPU: m_rawVertices/Indices empty — was uploadParsed called?");
-        return false;
-    }
-    LOGI("performSeparationCPU: separating %zu verts, %zu tris",
-         m_rawVertices.size(), m_rawIndices.size()/3);
-
-    // Use stored raw copy — safe to read on IO thread, GL thread only reads m_meshes[0]
-    // for drawing which is a separate MeshObject with its own VAO/VBO
-    ModelData tmp;
-    tmp.vertices  = m_rawVertices;   // copy from safe storage (not from m_meshes[0])
-    tmp.indices = m_rawIndices;  // both are vector<unsigned int>
-    tmp.origSizeX = m_origWmm;
-    tmp.origSizeY = m_origHmm;
-    tmp.origSizeZ = m_origDmm;
-    tmp.unitToMM  = 1.0f;
-    m_pendingMeshes.clear();
-    separateMeshesCPU(tmp, m_pendingMeshes);
-    LOGI("performSeparationCPU done: %d islands", (int)m_pendingMeshes.size());
-    return !m_pendingMeshes.empty();
+// Called from JNI after uploadParsed to hand raw data to bridge for safe separation
+void Renderer::getRawData(std::vector<Vertex>& verts, std::vector<uint32_t>& idx) const {
+    verts = m_rawVertices;
+    idx   = m_rawIndices;
+    LOGI("getRawData: %zu verts, %zu tris", verts.size(), idx.size()/3);
 }
 
-// Step 4 — GL thread: replace single mesh with separated meshes on GPU.
-bool Renderer::performSeparationGPU(){
-    if(m_pendingMeshes.empty()) return false;
+// GL thread: load pre-separated components from JNI bridge onto GPU
+bool Renderer::loadSeparatedComponents(std::vector<MeshComponent>& comps){
+    if(comps.empty()) return false;
+    // Free old GPU objects
     for(auto& mo:m_meshes){
         if(mo.vao) glDeleteVertexArrays(1,&mo.vao);
         if(mo.vbo) glDeleteBuffers(1,&mo.vbo);
         if(mo.ibo) glDeleteBuffers(1,&mo.ibo);
     }
     m_meshes.clear();
-    for(auto& mo : m_pendingMeshes){
-        mo.colorR = m_colorR; mo.colorG = m_colorG; mo.colorB = m_colorB;
+
+    static const float kColors[][3] = {
+        {0.0f,0.83f,1.0f},{1.0f,0.44f,0.26f},{0.30f,0.69f,0.51f},
+        {1.0f,0.84f,0.31f},{0.67f,0.48f,0.74f},{0.93f,0.25f,0.48f},
+        {0.15f,0.78f,0.85f},{0.83f,0.88f,0.34f}
+    };
+    const int NC = (int)(sizeof(kColors)/sizeof(kColors[0]));
+
+    for(int i=0;i<(int)comps.size();++i){
+        auto& comp = comps[i];
+        if(comp.vertices.empty()) continue;
+        MeshObject mo;
+        mo.name   = "Mesh_" + std::to_string(i+1);
+        mo.colorR = kColors[i%NC][0];
+        mo.colorG = kColors[i%NC][1];
+        mo.colorB = kColors[i%NC][2];
+        mo.vertices = std::move(comp.vertices);
+        mo.indices.resize(comp.indices.size());
+        for(size_t k=0;k<comp.indices.size();++k)
+            mo.indices[k] = (unsigned int)comp.indices[k];
         uploadMeshObject(mo);
         m_meshes.push_back(std::move(mo));
     }
-    m_pendingMeshes.clear();
-    m_pendingMeshes.shrink_to_fit();
-    // Free the raw copy — no longer needed after separation
-    m_rawVertices.clear(); m_rawVertices.shrink_to_fit();
-    m_rawIndices.clear();  m_rawIndices.shrink_to_fit();
     m_isSeparated  = true;
     m_selectedMesh = -1;
-    LOGI("performSeparationGPU: %d meshes on GPU", (int)m_meshes.size());
-    return true;
+    // Free raw data — separation complete
+    m_rawVertices.clear(); m_rawVertices.shrink_to_fit();
+    m_rawIndices.clear();  m_rawIndices.shrink_to_fit();
+    LOGI("loadSeparatedComponents: %d meshes on GPU", (int)m_meshes.size());
+    return !m_meshes.empty();
 }
 
 // ── Load model ───────────────────────────────────────────────────────────────

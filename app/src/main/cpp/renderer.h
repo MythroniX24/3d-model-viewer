@@ -43,9 +43,9 @@ public:
     bool uploadParsed();                        // GL thread — GPU upload as single mesh (instant)
     bool loadModel(const std::string& path);   // Legacy
 
-    // MANUAL SEPARATION (called by user via button)
-    bool performSeparationCPU();   // IO thread — Union-Find, NO GL calls
-    bool performSeparationGPU();   // GL thread — re-upload separated meshes
+    // Separation — called from JNI bridge (see jni_bridge.cpp)
+    void getRawData(std::vector<Vertex>& verts, std::vector<uint32_t>& idx) const;
+    bool loadSeparatedComponents(std::vector<MeshComponent>& comps);
     bool isSeparated() const { return m_isSeparated; }
 
     // Camera
@@ -77,6 +77,10 @@ public:
     void setMeshScaleMM(int idx, float w, float h, float d);
     void getMeshSizeMM(int idx, float& w, float& h, float& d) const;
     int  getMeshVertexCount(int idx) const;
+
+    // Separation helpers — called from JNI bridge
+    void getRawData(std::vector<Vertex>& verts, std::vector<uint32_t>& idx) const;
+    bool loadSeparatedComponents(std::vector<MeshComponent>& comps); // GL thread
 
     // Export
     bool exportOBJ(const std::string& path) const;

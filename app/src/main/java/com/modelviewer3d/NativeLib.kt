@@ -1,21 +1,22 @@
 package com.modelviewer3d
 
 object NativeLib {
+    // Core
     external fun nativeInit(width: Int, height: Int)
     external fun nativeResize(width: Int, height: Int)
     external fun nativeDraw()
     external fun nativeDestroy()
 
-    // Two-step load
+    // Model loading (two-step)
     external fun nativeParseModel(path: String): Boolean   // IO thread
     external fun nativeUploadParsed(): Boolean             // GL thread
     external fun nativeLoadModel(path: String): Boolean    // legacy
 
-    // Manual separation (user button)
-    external fun nativePerformSeparationCPU(): Boolean     // IO thread
+    // Separation (now fully managed in JNI bridge)
+    external fun nativePerformSeparationCPU(): Boolean     // background thread - safe
     external fun nativePerformSeparationGPU(): Boolean     // GL thread
     external fun nativeIsSeparated(): Boolean
-    external fun nativeGetSeparationProgress(): Int  // 0-100
+    external fun nativeGetSeparationProgress(): Int        // 0-100, atomic
 
     // Camera
     external fun nativeTouchRotate(dx: Float, dy: Float)
@@ -23,7 +24,7 @@ object NativeLib {
     external fun nativeTouchPan(dx: Float, dy: Float)
     external fun nativeResetCamera()
 
-    // Transform
+    // Global transform
     external fun nativeSetRotation(x: Float, y: Float, z: Float)
     external fun nativeSetTranslation(x: Float, y: Float, z: Float)
     external fun nativeSetScaleMM(w: Float, h: Float, d: Float)
@@ -47,7 +48,7 @@ object NativeLib {
     external fun nativeGetFPS(): Float
     external fun nativeGetModelSizeMM(): FloatArray
 
-    // Mesh
+    // Mesh management
     external fun nativeGetMeshCount(): Int
     external fun nativeGetMeshName(idx: Int): String
     external fun nativeSelectMesh(idx: Int)

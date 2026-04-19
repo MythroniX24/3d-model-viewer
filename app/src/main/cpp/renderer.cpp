@@ -174,8 +174,8 @@ void Renderer::cacheUniformLocs(){
     m_uloc.selected = glGetUniformLocation(m_mainProg, "uSelected");
     m_uloc.camPos   = glGetUniformLocation(m_mainProg, "uCamPos");
     m_uloc.wireMvp  = glGetUniformLocation(m_wireProg,  "uMVP");
-    m_uloc.wireColor    = m_uloc.wireColor;
-    m_uloc.wirePointSize= m_uloc.wirePointSize;
+    m_uloc.wireColor     = glGetUniformLocation(m_wireProg, "uColor");
+    m_uloc.wirePointSize = glGetUniformLocation(m_wireProg, "uPointSize");
 }
 
 // ── Bounding box ─────────────────────────────────────────────────────────────
@@ -603,6 +603,10 @@ void Renderer::deleteMesh(int idx){
 void Renderer::setMeshVisible(int idx,bool v){
     if(idx>=0&&idx<(int)m_meshes.size()) m_meshes[idx].visible=v;
 }
+bool Renderer::getMeshVisible(int idx) const {
+    if(idx<0||idx>=(int)m_meshes.size()) return false;
+    return m_meshes[idx].visible;
+}
 void Renderer::setMeshColor(int idx,float r,float g,float b){
     if(idx>=0&&idx<(int)m_meshes.size()){ m_meshes[idx].colorR=r;m_meshes[idx].colorG=g;m_meshes[idx].colorB=b; }
 }
@@ -650,59 +654,106 @@ void Renderer::getCurrentSizeMM(float& w,float& h,float& d) const {
     w=fabsf(m_scaX)*m_origWmm; h=fabsf(m_scaY)*m_origHmm; d=fabsf(m_scaZ)*m_origDmm;
 }
 
+// ── Export helpers ────────────────────────────────────────────────────────────
+// Transform a 3D point by a column-major 4x4 matrix (with perspective divide)
+static Vec3 applyMat4Point(const Mat4& mat, float x, float y, float z) {
+    return {
+        mat.m[0]*x + mat.m[4]*y + mat.m[8]*z  + mat.m[12],
+        mat.m[1]*x + mat.m[5]*y + mat.m[9]*z  + mat.m[13],
+        mat.m[2]*x + mat.m[6]*y + mat.m[10]*z + mat.m[14]
+    };
+}
+// Transform a normal using the upper-left 3x3 of the matrix, then renormalize
+static Vec3 applyMat4Normal(const Mat4& mat, float nx, float ny, float nz) {
+    Vec3 n{
+        mat.m[0]*nx + mat.m[4]*ny + mat.m[8]*nz,
+        mat.m[1]*nx + mat.m[5]*ny + mat.m[9]*nz,
+        mat.m[2]*nx + mat.m[6]*ny + mat.m[10]*nz
+    };
+    float len = sqrtf(n.x*n.x + n.y*n.y + n.z*n.z);
+    if(len > 1e-9f){ n.x /= len; n.y /= len; n.z /= len; }
+    return n;
+}
+
 // ── Export ───────────────────────────────────────────────────────────────────
 bool Renderer::exportOBJ(const std::string& path) const {
     std::ofstream f(path);
     if(!f) return false;
-    f<<"# Exported by 3D Model Viewer\n";
-    int baseVertex=1;
-    for(const auto& mo:m_meshes){
+    f << "# Exported by 3D Model Viewer\n";
+    f << std::fixed; f.precision(6);
+
+    Mat4 global = buildGlobalMatrix();
+    int baseVertex = 1;
+
+    for(const auto& mo : m_meshes){
         if(!mo.visible) continue;
-        f<<"o "<<mo.name<<"\n";
-        for(const auto& v:mo.vertices)
-            f<<"v "<<v.px<<" "<<v.py<<" "<<v.pz<<"\n";
-        for(const auto& v:mo.vertices)
-            f<<"vn "<<v.nx<<" "<<v.ny<<" "<<v.nz<<"\n";
-        for(size_t i=0;i+2<mo.indices.size();i+=3){
-            int a=mo.indices[i+0]+baseVertex;
-            int b=mo.indices[i+1]+baseVertex;
-            int c=mo.indices[i+2]+baseVertex;
-            f<<"f "<<a<<"//"<<a<<" "<<b<<"//"<<b<<" "<<c<<"//"<<c<<"\n";
+        f << "o " << mo.name << "\n";
+
+        // Combined: global scale/rotate/translate * per-mesh transform
+        Mat4 model = global * buildMeshMatrix(mo);
+
+        for(const auto& v : mo.vertices){
+            Vec3 p = applyMat4Point(model, v.px, v.py, v.pz);
+            f << "v " << p.x << " " << p.y << " " << p.z << "\n";
         }
-        baseVertex+=(int)mo.vertices.size();
+        for(const auto& v : mo.vertices){
+            Vec3 n = applyMat4Normal(model, v.nx, v.ny, v.nz);
+            f << "vn " << n.x << " " << n.y << " " << n.z << "\n";
+        }
+        for(size_t i = 0; i+2 < mo.indices.size(); i+=3){
+            int a = (int)mo.indices[i+0] + baseVertex;
+            int b = (int)mo.indices[i+1] + baseVertex;
+            int c = (int)mo.indices[i+2] + baseVertex;
+            f << "f " << a << "//" << a << " " << b << "//" << b << " " << c << "//" << c << "\n";
+        }
+        baseVertex += (int)mo.vertices.size();
     }
     return true;
 }
 
 bool Renderer::exportSTL(const std::string& path) const {
-    std::ofstream f(path,std::ios::binary);
+    std::ofstream f(path, std::ios::binary);
     if(!f) return false;
-    // Count total triangles
-    uint32_t total=0;
-    for(const auto& mo:m_meshes) if(mo.visible) total+=(uint32_t)(mo.indices.size()/3);
 
-    char header[80]="3D Model Viewer Export"; f.write(header,80);
-    f.write(reinterpret_cast<const char*>(&total),4);
+    Mat4 global = buildGlobalMatrix();
 
-    for(const auto& mo:m_meshes){
+    // Count total visible triangles
+    uint32_t total = 0;
+    for(const auto& mo : m_meshes) if(mo.visible) total += (uint32_t)(mo.indices.size()/3);
+
+    char header[80] = "3D Model Viewer Export";
+    f.write(header, 80);
+    f.write(reinterpret_cast<const char*>(&total), 4);
+
+    for(const auto& mo : m_meshes){
         if(!mo.visible) continue;
-        for(size_t i=0;i+2<mo.indices.size();i+=3){
-            const auto& v0=mo.vertices[mo.indices[i+0]];
-            const auto& v1=mo.vertices[mo.indices[i+1]];
-            const auto& v2=mo.vertices[mo.indices[i+2]];
-            Vec3 e1{v1.px-v0.px,v1.py-v0.py,v1.pz-v0.pz};
-            Vec3 e2{v2.px-v0.px,v2.py-v0.py,v2.pz-v0.pz};
-            Vec3 n=e1.cross(e2).normalized();
-            float nf[3]={n.x,n.y,n.z};
-            float p0[3]={v0.px,v0.py,v0.pz};
-            float p1[3]={v1.px,v1.py,v1.pz};
-            float p2[3]={v2.px,v2.py,v2.pz};
-            uint16_t att=0;
-            f.write(reinterpret_cast<const char*>(nf),12);
-            f.write(reinterpret_cast<const char*>(p0),12);
-            f.write(reinterpret_cast<const char*>(p1),12);
-            f.write(reinterpret_cast<const char*>(p2),12);
-            f.write(reinterpret_cast<const char*>(&att),2);
+        Mat4 model = global * buildMeshMatrix(mo);
+
+        for(size_t i = 0; i+2 < mo.indices.size(); i+=3){
+            const auto& v0 = mo.vertices[mo.indices[i+0]];
+            const auto& v1 = mo.vertices[mo.indices[i+1]];
+            const auto& v2 = mo.vertices[mo.indices[i+2]];
+
+            // Transform positions by the full model matrix
+            Vec3 p0 = applyMat4Point(model, v0.px, v0.py, v0.pz);
+            Vec3 p1 = applyMat4Point(model, v1.px, v1.py, v1.pz);
+            Vec3 p2 = applyMat4Point(model, v2.px, v2.py, v2.pz);
+
+            // Recompute face normal from transformed positions
+            Vec3 e1{p1.x-p0.x, p1.y-p0.y, p1.z-p0.z};
+            Vec3 e2{p2.x-p0.x, p2.y-p0.y, p2.z-p0.z};
+            Vec3 n = e1.cross(e2).normalized();
+
+            float nf[3]  = {n.x,  n.y,  n.z};
+            float pf0[3] = {p0.x, p0.y, p0.z};
+            float pf1[3] = {p1.x, p1.y, p1.z};
+            float pf2[3] = {p2.x, p2.y, p2.z};
+            uint16_t att = 0;
+            f.write(reinterpret_cast<const char*>(nf),  12);
+            f.write(reinterpret_cast<const char*>(pf0), 12);
+            f.write(reinterpret_cast<const char*>(pf1), 12);
+            f.write(reinterpret_cast<const char*>(pf2), 12);
+            f.write(reinterpret_cast<const char*>(&att), 2);
         }
     }
     return true;

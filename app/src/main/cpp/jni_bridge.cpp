@@ -202,7 +202,8 @@ JNIEXPORT void JNICALL Java_com_modelviewer3d_NativeLib_nativeSetMeshVisible(JNI
     if(g_renderer) g_renderer->setMeshVisible((int)idx,v==JNI_TRUE);
 }
 JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeGetMeshVisible(JNIEnv*,jclass,jint idx){
-    return JNI_TRUE;
+    if(!g_renderer) return JNI_TRUE;
+    return g_renderer->getMeshVisible((int)idx) ? JNI_TRUE : JNI_FALSE;
 }
 JNIEXPORT void JNICALL Java_com_modelviewer3d_NativeLib_nativeSetMeshColor(JNIEnv*,jclass,jint idx,jfloat r,jfloat g,jfloat b){
     if(g_renderer) g_renderer->setMeshColor((int)idx,r,g,b);

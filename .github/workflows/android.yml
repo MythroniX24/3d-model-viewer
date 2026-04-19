@@ -5,31 +5,46 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:   # Manual trigger from Actions tab
+  workflow_dispatch:    # Manual trigger from Actions tab
 
 jobs:
   build:
     name: Build Debug + Release APK
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60   # NDK C++ builds can take 30-45 min cold
 
     steps:
-      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. JDK 17 ───────────────────────────────────────────────────────────
+      # ── 2. JDK 17 ────────────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      # ── 3. Android SDK ──────────────────────────────────────────────────────
+      # ── 3. Bootstrap gradle-wrapper.jar (fast — wget from Gradle CDN) ────────
+      # Downloads the binary jar directly instead of installing Gradle via SDKMAN.
+      # ~2 seconds vs 3-5 minutes for the SDKMAN approach.
+      - name: Bootstrap Gradle wrapper jar
+        run: |
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "gradle-wrapper.jar not found — downloading from Gradle CDN"
+            mkdir -p gradle/wrapper
+            wget -q -O gradle/wrapper/gradle-wrapper.jar \
+              "https://github.com/gradle/gradle/raw/v8.2.0/gradle/wrapper/gradle-wrapper.jar"
+            echo "✓ gradle-wrapper.jar downloaded"
+          else
+            echo "✓ gradle-wrapper.jar already present"
+          fi
+
+      # ── 4. Android SDK ────────────────────────────────────────────────────────
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # ── 4. Install NDK 27 + CMake 3.22 ─────────────────────────────────────
+      # ── 5. Install NDK 27 + CMake 3.22 ───────────────────────────────────────
       - name: Install NDK and CMake
         run: |
           sdkmanager \
@@ -38,24 +53,7 @@ jobs:
             --sdk_root=$ANDROID_SDK_ROOT
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
 
-      # ── 5. Bootstrap gradle-wrapper.jar if missing ──────────────────────────
-      # The binary jar cannot be committed easily; we generate it with the
-      # system Gradle, then all subsequent ./gradlew calls work normally.
-      - name: Bootstrap Gradle wrapper jar
-        run: |
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            echo "gradle-wrapper.jar not found — bootstrapping with system gradle"
-            # Install gradle 8.2 via SDKMAN
-            curl -s "https://get.sdkman.io" | bash
-            source "$HOME/.sdkman/bin/sdkman-init.sh"
-            sdk install gradle 8.2
-            gradle wrapper --gradle-version=8.2 --distribution-type=bin
-            echo "✓ gradle-wrapper.jar generated"
-          else
-            echo "✓ gradle-wrapper.jar already present"
-          fi
-
-      # ── 6. Cache Gradle downloads ────────────────────────────────────────────
+      # ── 6. Cache Gradle downloads ─────────────────────────────────────────────
       - name: Cache Gradle caches
         uses: actions/cache@v4
         with:
@@ -65,19 +63,19 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      # ── 7. Cache CMake FetchContent (tinyobjloader, tinygltf) ───────────────
-      - name: Cache CMake FetchContent
+      # ── 7. Cache CMake / NDK build outputs ────────────────────────────────────
+      - name: Cache CMake build outputs
         uses: actions/cache@v4
         with:
           path: app/.cxx
-          key: cxx-${{ runner.os }}-${{ hashFiles('**/CMakeLists.txt') }}
+          key: cxx-${{ runner.os }}-${{ hashFiles('**/CMakeLists.txt','**/*.cpp','**/*.h') }}
           restore-keys: cxx-${{ runner.os }}-
 
-      # ── 8. Make gradlew executable ───────────────────────────────────────────
+      # ── 8. Make gradlew executable ────────────────────────────────────────────
       - name: Grant gradlew execute permission
         run: chmod +x ./gradlew
 
-      # ── 9. Build Debug APK ───────────────────────────────────────────────────
+      # ── 9. Build Debug APK ────────────────────────────────────────────────────
       - name: Build Debug APK
         run: |
           ./gradlew assembleDebug \
@@ -85,7 +83,7 @@ jobs:
             --stacktrace \
             -Pandroid.ndkVersion=27.2.12479018
 
-      # ── 10. Build Release APK (unsigned) ─────────────────────────────────────
+      # ── 10. Build Release APK (unsigned) ──────────────────────────────────────
       - name: Build Release APK (unsigned)
         run: |
           ./gradlew assembleRelease \
@@ -93,28 +91,28 @@ jobs:
             --stacktrace \
             -Pandroid.ndkVersion=27.2.12479018
 
-      # ── 11. Show output APKs ─────────────────────────────────────────────────
+      # ── 11. Show built APKs ───────────────────────────────────────────────────
       - name: List built APKs
         run: find app/build/outputs/apk -name "*.apk" -exec ls -lh {} \;
 
-      # ── 12. Upload Debug APK ─────────────────────────────────────────────────
-      - name: Upload Debug APK artifact
+      # ── 12. Upload Debug APK artifact ─────────────────────────────────────────
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: 3DModelViewer-debug-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
-      # ── 13. Upload Release APK ───────────────────────────────────────────────
-      - name: Upload Release APK artifact (unsigned)
+      # ── 13. Upload Release APK artifact ───────────────────────────────────────
+      - name: Upload Release APK (unsigned)
         uses: actions/upload-artifact@v4
         with:
           name: 3DModelViewer-release-unsigned-${{ github.run_number }}
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      # ── 14. GitHub Release on version tag ────────────────────────────────────
-      - name: Create GitHub Release (on tag push)
+      # ── 14. Create GitHub Release on version tag (git tag v1.0.0 → push) ─────
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:

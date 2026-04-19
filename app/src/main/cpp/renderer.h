@@ -73,14 +73,13 @@ public:
     int  getSelectedMesh() const { return m_selectedMesh; }
     void deleteMesh(int idx);
     void setMeshVisible(int idx, bool v);
+    bool getMeshVisible(int idx) const;
     void setMeshColor(int idx, float r, float g, float b);
     void setMeshScaleMM(int idx, float w, float h, float d);
     void getMeshSizeMM(int idx, float& w, float& h, float& d) const;
     int  getMeshVertexCount(int idx) const;
 
-    // Separation helpers — called from JNI bridge
-    void getRawData(std::vector<Vertex>& verts, std::vector<uint32_t>& idx) const;
-    bool loadSeparatedComponents(std::vector<MeshComponent>& comps); // GL thread
+    // Separation helpers — called from JNI bridge (implementations in renderer.cpp)
 
     // Export
     bool exportOBJ(const std::string& path) const;
@@ -131,7 +130,6 @@ private:
 
     // Pending data between parse and upload
     ModelData*              m_pendingData  = nullptr;
-    std::vector<MeshObject> m_pendingMeshes;  // used by performSeparation
 
     // Raw vertex/index data kept alive for separation (safe to read from IO thread)
     // Set in uploadParsed(), cleared after performSeparationGPU()

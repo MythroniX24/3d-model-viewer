@@ -462,7 +462,6 @@ void Renderer::setShowBoundingBox(bool on){m_showBBox=on;}
 bool Renderer::parseModel(const std::string& path){
     delete m_pendingData;
     m_pendingData = nullptr;
-    m_pendingMeshes.clear();
 
     ModelData* md = new ModelData();
     if(!ModelLoader::load(path, *md)){

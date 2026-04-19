@@ -1,6 +1,7 @@
 package com.modelviewer3d
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -9,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
@@ -24,6 +26,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.channels.Channels
 import java.text.SimpleDateFormat
@@ -101,21 +104,45 @@ class MainActivity : AppCompatActivity() {
             findViewById<View>(R.id.btnScreenshot).setOnClickListener { takeScreenshot() }
             findViewById<View>(R.id.btnReset).setOnClickListener      { glView.queueEvent { NativeLib.nativeResetCamera() } }
             findViewById<View?>(R.id.btnClearRuler)?.setOnClickListener { clearRuler() }
-
-            // Also wire the "Open Model" button inside the hint card
             findViewById<android.view.View?>(R.id.btnOpenHint)?.setOnClickListener { requestOpenFile() }
 
-            // Register receiver for separation CPU-done signal (GPU upload needed on GL thread)
+            // Register receiver for separation CPU-done signal
             val sepFilter = IntentFilter(SeparationService.ACTION_SEPARATION_CPU_DONE)
-            if (android.os.Build.VERSION.SDK_INT >= 33) {
+            if (Build.VERSION.SDK_INT >= 33) {
                 registerReceiver(separationCpuDoneReceiver, sepFilter, android.content.Context.RECEIVER_NOT_EXPORTED)
             } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
                 registerReceiver(separationCpuDoneReceiver, sepFilter)
             }
 
-            intent?.data?.let { openModelFromUri(it) }
+            // Handle: opened via file manager (ACTION_VIEW)
+            if (intent?.action == Intent.ACTION_VIEW) {
+                intent?.data?.let { openModelFromUri(it) }
+            }
+            // Handle: file shared TO this app (ACTION_SEND from WhatsApp/Telegram/etc.)
+            else if (intent?.action == Intent.ACTION_SEND) {
+                val uri = if (Build.VERSION.SDK_INT >= 33)
+                    intent?.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent?.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                uri?.let { openModelFromUri(it) }
+            }
+
         } catch (e: Exception) {
             toast("Init error: ${e.message}")
+        }
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        intent ?: return
+        when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data?.let { openModelFromUri(it) }
+            Intent.ACTION_SEND -> {
+                val uri = if (Build.VERSION.SDK_INT >= 33)
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                else @Suppress("DEPRECATION") intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                uri?.let { openModelFromUri(it) }
+            }
         }
     }
 
@@ -127,18 +154,15 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // ── Separation GPU upload (triggered by SeparationService broadcast) ───────
+    // ── Separation GPU upload ─────────────────────────────────────────────────
     private val separationCpuDoneReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
             if (intent.action != SeparationService.ACTION_SEPARATION_CPU_DONE) return
-            // GPU upload must happen on GL thread
             glView.queueEvent {
                 val ok = NativeLib.nativePerformSeparationGPU()
-                val mc = NativeLib.nativeGetMeshCount()
                 runOnUiThread {
                     if (ok) {
                         updateStatusBar()
-                        // Notify service that GPU upload is done
                         sendBroadcast(android.content.Intent(SeparationService.ACTION_SEPARATION_COMPLETE))
                     } else {
                         sendBroadcast(android.content.Intent(SeparationService.ACTION_SEPARATION_FAILED))
@@ -148,7 +172,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ── Status Bar ────────────────────────────────────────────────────────────
+    // ── Status Bar ───────────────────────────────────────────────────────────
     fun updateStatusBar() {
         glView.queueEvent {
             val meshCount = NativeLib.nativeGetMeshCount()
@@ -225,6 +249,11 @@ class MainActivity : AppCompatActivity() {
         ExportFragment.newInstance().show(supportFragmentManager, ExportFragment.TAG)
     }
 
+    /**
+     * Export model to OBJ or STL.
+     * - share=false → saves to Downloads/3DViewer/ (visible in Files app, no permission needed)
+     * - share=true  → exports to cache then shares via system chooser
+     */
     fun exportModel(format: String, share: Boolean, shareApp: String? = null) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -232,34 +261,22 @@ class MainActivity : AppCompatActivity() {
                 val baseName = if (currentFileName.isNotEmpty())
                     currentFileName.substringBeforeLast('.') else "model"
                 val fileName = "${baseName}_$ts.$format"
-                val outDir = if (share) cacheDir
-                    else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                        File(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "3DViewer")
-                    else File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "3DViewer")
-                outDir.mkdirs()
-                val outFile = File(outDir, fileName)
 
-                var ok = false
-                val latch = CountDownLatch(1)
-                glView.queueEvent {
-                    try {
-                        ok = when (format) {
-                            "obj" -> NativeLib.nativeExportOBJ(outFile.absolutePath)
-                            "stl" -> NativeLib.nativeExportSTL(outFile.absolutePath)
-                            else  -> false
-                        }
-                    } catch (_: Exception) {}
-                    latch.countDown()
-                }
-                latch.await()
-
-                withContext(Dispatchers.Main) {
-                    if (!ok) { toast("Export failed"); return@withContext }
-                    if (share) {
+                // For sharing: write to cache first
+                if (share) {
+                    val cacheFile = File(cacheDir, fileName)
+                    val ok = runExportNative(format, cacheFile)
+                    withContext(Dispatchers.Main) {
+                        if (!ok) { toast("Export failed"); return@withContext }
                         val uri = FileProvider.getUriForFile(
-                            this@MainActivity, "$packageName.fileprovider", outFile)
+                            this@MainActivity, "$packageName.fileprovider", cacheFile)
+                        val mimeType = when(format) {
+                            "obj" -> "model/obj"
+                            "stl" -> "model/stl"
+                            else  -> "application/octet-stream"
+                        }
                         val intent = Intent(Intent.ACTION_SEND).apply {
-                            type = if (format=="obj") "text/plain" else "application/octet-stream"
+                            type = mimeType
                             putExtra(Intent.EXTRA_STREAM, uri)
                             putExtra(Intent.EXTRA_SUBJECT, "3D Model: $fileName")
                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -267,18 +284,124 @@ class MainActivity : AppCompatActivity() {
                         }
                         try {
                             startActivity(Intent.createChooser(intent, "Share 3D Model via"))
-                        } catch (e: Exception) {
+                        } catch (_: Exception) {
                             toast("App not installed")
                         }
-                    } else {
-                        MediaScannerConnection.scanFile(this@MainActivity, arrayOf(outFile.absolutePath), null, null)
-                        toast("✅ Saved: ${outFile.name}")
                     }
+                    return@launch
                 }
+
+                // ── Save to device ─────────────────────────────────────────────
+                // Android 10+ (API 29+): use MediaStore.Downloads (no permission needed)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    saveToMediaStoreDownloads(fileName, format)
+                } else {
+                    // Android 9 and below: write directly to public Downloads
+                    saveToPublicDownloads(fileName, format)
+                }
+
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { toast("Error: ${e.message}") }
             }
         }
+    }
+
+    /**
+     * Android 10+ (API 29+): Insert into MediaStore.Downloads.
+     * File appears in: Files → Downloads → 3DViewer/
+     * No permission required.
+     */
+    private suspend fun saveToMediaStoreDownloads(fileName: String, format: String) {
+        val mimeType = when(format) { "obj" -> "model/obj"; "stl" -> "model/stl"; else -> "application/octet-stream" }
+
+        // Write native export to cache first (native needs a real file path)
+        val cacheFile = File(cacheDir, fileName)
+        val ok = runExportNative(format, cacheFile)
+        if (!ok) {
+            withContext(Dispatchers.Main) { toast("Export failed") }
+            return
+        }
+
+        try {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.RELATIVE_PATH, "Download/3DViewer")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = contentResolver
+            val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val itemUri = resolver.insert(collection, values)
+
+            if (itemUri != null) {
+                resolver.openOutputStream(itemUri)?.use { out ->
+                    FileInputStream(cacheFile).use { it.copyTo(out) }
+                }
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(itemUri, values, null, null)
+                cacheFile.delete()
+                withContext(Dispatchers.Main) {
+                    toast("✅ Saved to Downloads/3DViewer/$fileName")
+                }
+            } else {
+                // MediaStore insert failed → fall back to app external storage
+                saveFallback(fileName, format, cacheFile)
+            }
+        } catch (e: Exception) {
+            saveFallback(fileName, format, cacheFile)
+        }
+    }
+
+    /**
+     * Android 9 and below: write to public Downloads directly.
+     */
+    private suspend fun saveToPublicDownloads(fileName: String, format: String) {
+        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "3DViewer")
+        dir.mkdirs()
+        val outFile = File(dir, fileName)
+        val ok = runExportNative(format, outFile)
+        withContext(Dispatchers.Main) {
+            if (!ok) { toast("Export failed"); return@withContext }
+            MediaScannerConnection.scanFile(this@MainActivity, arrayOf(outFile.absolutePath), null, null)
+            toast("✅ Saved to Downloads/3DViewer/$fileName")
+        }
+    }
+
+    /**
+     * Fallback: save to app-specific external storage (always works, visible in file managers).
+     * Path: /sdcard/Android/data/com.modelviewer3d/files/3DViewer/
+     */
+    private suspend fun saveFallback(fileName: String, format: String, cacheFile: File) {
+        val dir = File(getExternalFilesDir(null), "3DViewer")
+        dir.mkdirs()
+        val outFile = File(dir, fileName)
+        cacheFile.copyTo(outFile, overwrite = true)
+        cacheFile.delete()
+        withContext(Dispatchers.Main) {
+            toast("✅ Saved to Android/data/com.modelviewer3d/files/3DViewer/$fileName")
+        }
+    }
+
+    /**
+     * Run the native export on the GL thread and wait for result.
+     */
+    private fun runExportNative(format: String, outFile: File): Boolean {
+        outFile.parentFile?.mkdirs()
+        var ok = false
+        val latch = CountDownLatch(1)
+        glView.queueEvent {
+            try {
+                ok = when (format) {
+                    "obj" -> NativeLib.nativeExportOBJ(outFile.absolutePath)
+                    "stl" -> NativeLib.nativeExportSTL(outFile.absolutePath)
+                    else  -> false
+                }
+            } catch (_: Exception) {}
+            latch.countDown()
+        }
+        latch.await()
+        return ok
     }
 
     // ── File open ─────────────────────────────────────────────────────────────
@@ -296,34 +419,55 @@ class MainActivity : AppCompatActivity() {
                 arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
             else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE))
     }
-    private fun launchFilePicker() { filePicker.launch(arrayOf("*/*")) }
+    private fun launchFilePicker() {
+        filePicker.launch(arrayOf(
+            "*/*",
+            "model/stl", "model/obj", "model/gltf-binary",
+            "application/octet-stream"
+        ))
+    }
 
-    private fun openModelFromUri(uri: Uri) {
+    fun openModelFromUri(uri: Uri) {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                val name = resolveFileName(uri) ?: "model.obj"
+                // Resolve the display name from the URI
+                var name = resolveFileName(uri)
+
+                // If no name or unknown extension, try to get from MIME type
+                if (name == null || !hasKnownExtension(name)) {
+                    val mime = contentResolver.getType(uri) ?: ""
+                    val ext  = mimeToExtension(mime)
+                    name = if (name != null && ext.isNotEmpty()) "${name.substringBeforeLast('.')}.$ext"
+                    else if (ext.isNotEmpty()) "model.$ext"
+                    else name ?: "model.stl"
+                }
+
+                // Final safety check
+                if (!hasKnownExtension(name)) name = "model.stl"
+
                 currentFileName = name
                 val dest = File(cacheDir, name)
-                // NIO channel transfer — ~5x faster than stream copyTo()
+
+                // Copy URI content to local cache file (NIO fast transfer)
                 contentResolver.openInputStream(uri)?.use { inp ->
                     val src = Channels.newChannel(inp)
                     FileOutputStream(dest).channel.use { dst ->
                         var pos = 0L
-                        while(true) { val n = dst.transferFrom(src, pos, 4L*1024*1024); if(n<=0) break; pos+=n }
+                        while (true) { val n = dst.transferFrom(src, pos, 4L*1024*1024); if(n<=0) break; pos+=n }
                     }
                 }
+
                 withContext(Dispatchers.Main) {
                     tvHint?.visibility = View.GONE
-                    showLoading("Loading $name…", "Parsing & separating meshes…")
+                    showLoading("Loading $name…", "Parsing model…")
                 }
-                // parseModel now does: file parse + mesh separation on IO thread
-                // uploadParsed only does fast GPU buffer upload on GL thread
+
                 val parseOk = try { NativeLib.nativeParseModel(dest.absolutePath) } catch (_: Exception) { false }
                 if (!parseOk) {
                     withContext(Dispatchers.Main) { hideLoading(); toast("Failed to parse $name") }
                     return@launch
                 }
-                withContext(Dispatchers.Main) { showLoading("Sending to GPU…", "Almost ready…") }
+                withContext(Dispatchers.Main) { showLoading("Uploading to GPU…", "Almost ready…") }
                 var uploadOk = false
                 val latch = CountDownLatch(1)
                 glView.queueEvent {
@@ -333,10 +477,8 @@ class MainActivity : AppCompatActivity() {
                 latch.await()
                 withContext(Dispatchers.Main) {
                     hideLoading()
-                    if (uploadOk) {
-                        toast("✓ $name loaded")
-                        updateStatusBar()
-                    } else toast("GPU upload failed")
+                    if (uploadOk) { toast("✓ $name loaded"); updateStatusBar() }
+                    else toast("GPU upload failed")
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) { hideLoading(); toast("Error: ${e.message}") }
@@ -344,21 +486,36 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun hasKnownExtension(name: String): Boolean {
+        val low = name.lowercase()
+        return low.endsWith(".obj") || low.endsWith(".stl") || low.endsWith(".glb")
+    }
+
+    private fun mimeToExtension(mime: String): String = when {
+        "stl" in mime || mime == "model/stl"          -> "stl"
+        "obj" in mime || mime == "model/obj"           -> "obj"
+        "gltf" in mime || mime == "model/gltf-binary"  -> "glb"
+        else -> ""
+    }
+
     private fun resolveFileName(uri: Uri): String? {
-        if (uri.scheme=="file") return uri.lastPathSegment
-        contentResolver.query(uri,null,null,null,null)?.use { c ->
-            if (c.moveToFirst()) { val i=c.getColumnIndex(OpenableColumns.DISPLAY_NAME); if(i>=0) return c.getString(i) }
+        if (uri.scheme == "file") return uri.lastPathSegment
+        contentResolver.query(uri, null, null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (i >= 0) return c.getString(i)
+            }
         }
         return uri.lastPathSegment
     }
 
     // ── Panels ────────────────────────────────────────────────────────────────
     private fun openEditor() {
-        if (supportFragmentManager.findFragmentByTag(EditorPanelFragment.TAG)!=null) return
+        if (supportFragmentManager.findFragmentByTag(EditorPanelFragment.TAG) != null) return
         EditorPanelFragment.newInstance().show(supportFragmentManager, EditorPanelFragment.TAG)
     }
     private fun openMeshList() {
-        if (supportFragmentManager.findFragmentByTag(MeshListFragment.TAG)!=null) return
+        if (supportFragmentManager.findFragmentByTag(MeshListFragment.TAG) != null) return
         MeshListFragment.newInstance().show(supportFragmentManager, MeshListFragment.TAG)
     }
 
@@ -372,35 +529,49 @@ class MainActivity : AppCompatActivity() {
 
     // ── Screenshot ────────────────────────────────────────────────────────────
     private fun takeScreenshot() {
-        val capW=glView.width; val capH=glView.height
-        if (capW==0||capH==0) { toast("No model loaded"); return }
+        val capW = glView.width; val capH = glView.height
+        if (capW == 0 || capH == 0) { toast("No model loaded"); return }
         lifecycleScope.launch {
-            var rgba: ByteArray?=null; val latch=CountDownLatch(1)
-            glView.queueEvent { try{rgba=NativeLib.nativeTakeScreenshot()}catch(_:Exception){}; latch.countDown() }
+            var rgba: ByteArray? = null; val latch = CountDownLatch(1)
+            glView.queueEvent { try { rgba = NativeLib.nativeTakeScreenshot() } catch(_: Exception){}; latch.countDown() }
             withContext(Dispatchers.IO) { latch.await() }
-            val bytes=rgba ?: run { toast("Screenshot failed"); return@launch }
-            val bmp=withContext(Dispatchers.Default){
-                val argb=IntArray(capW*capH)
-                for(i in argb.indices){ val b=i*4
-                    argb[i]=(bytes[b+3].toInt()and 0xFF shl 24)or(bytes[b].toInt()and 0xFF shl 16)or
-                             (bytes[b+1].toInt()and 0xFF shl 8)or(bytes[b+2].toInt()and 0xFF)
+            val bytes = rgba ?: run { toast("Screenshot failed"); return@launch }
+            val bmp = withContext(Dispatchers.Default) {
+                val argb = IntArray(capW * capH)
+                for (i in argb.indices) {
+                    val b = i * 4
+                    argb[i] = (bytes[b+3].toInt() and 0xFF shl 24) or
+                              (bytes[b+0].toInt() and 0xFF shl 16) or
+                              (bytes[b+1].toInt() and 0xFF shl 8)  or
+                              (bytes[b+2].toInt() and 0xFF)
                 }
-                Bitmap.createBitmap(argb,capW,capH,Bitmap.Config.ARGB_8888)
+                Bitmap.createBitmap(argb, capW, capH, Bitmap.Config.ARGB_8888)
             }
-            val saved=withContext(Dispatchers.IO){ saveBitmap(bmp) }
-            toast(if(saved!=null)"📸 Saved: ${saved.name}" else "Could not save screenshot")
+            val saved = withContext(Dispatchers.IO) { saveBitmap(bmp) }
+            toast(if (saved != null) "📸 Saved: ${saved.name}" else "Could not save screenshot")
         }
     }
-    private fun saveBitmap(bmp: Bitmap): File? = try {
-        val dir=if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.Q)
-            File(getExternalFilesDir(Environment.DIRECTORY_PICTURES),"3DViewer")
-        else File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),"3DViewer")
-        dir.mkdirs()
-        val ts=SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(Date())
-        val f=File(dir,"3DViewer_$ts.png")
-        FileOutputStream(f).use{bmp.compress(Bitmap.CompressFormat.PNG,100,it)}
-        MediaScannerConnection.scanFile(this,arrayOf(f.absolutePath),null,null); f
-    } catch(_:Exception){null}
 
-    fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    private fun saveBitmap(bmp: Bitmap): File? = try {
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "3DViewer_$ts.png")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/3DViewer")
+            }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            uri?.let { contentResolver.openOutputStream(it)?.use { s -> bmp.compress(Bitmap.CompressFormat.PNG, 100, s) } }
+            null  // no File object for MediaStore saves, toast handled outside
+        } else {
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "3DViewer")
+            dir.mkdirs()
+            val f = File(dir, "3DViewer_$ts.png")
+            FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            MediaScannerConnection.scanFile(this, arrayOf(f.absolutePath), null, null)
+            f
+        }
+    } catch (_: Exception) { null }
+
+    fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 }

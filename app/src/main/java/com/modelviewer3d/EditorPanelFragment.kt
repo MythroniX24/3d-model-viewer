@@ -188,6 +188,9 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
                 override fun afterTextChanged(s: Editable?) {
                     // Bail out if we triggered this change ourselves
                     if (suppressTextChange) return
+                    // Bail out if model dimensions haven't loaded yet
+                    // (prevents setScaleMM(value, 0, 0) which collapses the model)
+                    if (origWmm < 0.001f || origHmm < 0.001f || origDmm < 0.001f) return
                     val v = s?.toString()?.toFloatOrNull() ?: return
                     if (v < 0.001f) return
 
@@ -211,10 +214,11 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
                         }
                         glRun { NativeLib.nativeSetScaleMM(nw, nh, nd) }
                     } else {
-                        // Non-uniform: read the current values of all three fields
-                        val wv = etW?.text?.toString()?.toFloatOrNull() ?: curWmm
-                        val hv = etH?.text?.toString()?.toFloatOrNull() ?: curHmm
-                        val dv = etD?.text?.toString()?.toFloatOrNull() ?: curDmm
+                        // Non-uniform: read each axis independently
+                        // Use origMM fallback (safe because guard above ensures origWmm>0)
+                        val wv = etW?.text?.toString()?.toFloatOrNull().takeIf { it != null && it > 0.001f } ?: origWmm
+                        val hv = etH?.text?.toString()?.toFloatOrNull().takeIf { it != null && it > 0.001f } ?: origHmm
+                        val dv = etD?.text?.toString()?.toFloatOrNull().takeIf { it != null && it > 0.001f } ?: origDmm
                         glRun { NativeLib.nativeSetScaleMM(wv, hv, dv) }
                     }
                 }

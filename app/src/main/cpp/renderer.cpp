@@ -688,8 +688,12 @@ bool Renderer::exportOBJ(const std::string& path) const {
         if(!mo.visible) continue;
         f << "o " << mo.name << "\n";
 
-        // Combined: global scale/rotate/translate * per-mesh transform
-        Mat4 model = global * buildMeshMatrix(mo);
+        // Combined transform: global(userScale/rot/trans) * meshTransform * mmConversion
+        // mmConversion converts from normalized [-1,1] coords back to real-world mm units.
+        // This ensures exported files are correctly sized (1 OBJ unit = 1 mm).
+        float toMM = (m_normalizeScale > 1e-9f) ? (1.0f / m_normalizeScale) : 1.0f;
+        Mat4 mmConv = Mat4::scale(toMM, toMM, toMM);
+        Mat4 model  = global * buildMeshMatrix(mo) * mmConv;
 
         for(const auto& v : mo.vertices){
             Vec3 p = applyMat4Point(model, v.px, v.py, v.pz);
@@ -726,7 +730,9 @@ bool Renderer::exportSTL(const std::string& path) const {
 
     for(const auto& mo : m_meshes){
         if(!mo.visible) continue;
-        Mat4 model = global * buildMeshMatrix(mo);
+        float toMM = (m_normalizeScale > 1e-9f) ? (1.0f / m_normalizeScale) : 1.0f;
+        Mat4 mmConv = Mat4::scale(toMM, toMM, toMM);
+        Mat4 model  = global * buildMeshMatrix(mo) * mmConv;
 
         for(size_t i = 0; i+2 < mo.indices.size(); i+=3){
             const auto& v0 = mo.vertices[mo.indices[i+0]];

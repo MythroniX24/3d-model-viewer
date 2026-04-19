@@ -33,18 +33,99 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:screenOrientation="unspecified"
             android:windowSoftInputMode="adjustResize">
+
+            <!-- App launcher -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <intent-filter>
+
+            <!-- Open OBJ files (file:// and content://) -->
+            <intent-filter android:priority="100">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="*/*" />
-                <data android:pathPattern=".*\\.obj" />
-                <data android:pathPattern=".*\\.stl" />
-                <data android:pathPattern=".*\\.glb" />
+                <data android:scheme="file" android:mimeType="*/*" android:pathSuffix=".obj" />
             </intent-filter>
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="*/*" android:pathSuffix=".obj" />
+            </intent-filter>
+
+            <!-- Open STL files (file:// and content://) -->
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" android:mimeType="*/*" android:pathSuffix=".stl" />
+            </intent-filter>
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="*/*" android:pathSuffix=".stl" />
+            </intent-filter>
+
+            <!-- Open GLB files (file:// and content://) -->
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" android:mimeType="*/*" android:pathSuffix=".glb" />
+            </intent-filter>
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="*/*" android:pathSuffix=".glb" />
+            </intent-filter>
+
+            <!-- Proper 3D model MIME types (used by some file managers) -->
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="model/stl" />
+                <data android:scheme="file"    android:mimeType="model/stl" />
+            </intent-filter>
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="model/obj" />
+                <data android:scheme="file"    android:mimeType="model/obj" />
+            </intent-filter>
+            <intent-filter android:priority="100">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="model/gltf-binary" />
+                <data android:scheme="file"    android:mimeType="model/gltf-binary" />
+            </intent-filter>
+
+            <!-- WhatsApp and Telegram: share STL/OBJ as application/octet-stream -->
+            <!-- ACTION_VIEW: open directly from WhatsApp document viewer -->
+            <intent-filter android:priority="50">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- ACTION_SEND: "Share" button in WhatsApp/Telegram sends to this app -->
+            <intent-filter android:priority="50">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+            <intent-filter android:priority="50">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="model/stl" />
+            </intent-filter>
+            <intent-filter android:priority="50">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="model/obj" />
+            </intent-filter>
+            <intent-filter android:priority="50">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
         </activity>
 
         <!-- Mesh separation background service -->

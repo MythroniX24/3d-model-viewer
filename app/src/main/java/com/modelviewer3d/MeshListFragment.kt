@@ -29,6 +29,8 @@ class MeshListFragment : BottomSheetDialogFragment() {
 
     private var listContainer: LinearLayout? = null
     private var btnSeparate:   Button?       = null
+    private var progressBar:   android.widget.ProgressBar? = null
+    private var tvProgress:    TextView?     = null
     private var separateCard:  View?         = null
     private var tvIslandTitle: TextView?     = null
 
@@ -165,6 +167,26 @@ class MeshListFragment : BottomSheetDialogFragment() {
         }
         btnSeparate = btn
         card.addView(btn)
+
+        // Progress bar (hidden until separation starts)
+        val pb = android.widget.ProgressBar(ctx, null,
+            android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; progress = 0
+            progressTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#00D4FF"))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 6
+            ).apply { setMargins(0, 8, 0, 0) }
+            visibility = View.GONE
+        }
+        progressBar = pb; card.addView(pb)
+
+        val tvProg = TextView(ctx).apply {
+            text = ""; textSize = 10f
+            setTextColor(Color.parseColor("#606080")); setPadding(0, 4, 0, 0)
+            visibility = View.GONE
+        }
+        tvProgress = tvProg; card.addView(tvProg)
+
         return card
     }
 
@@ -176,15 +198,23 @@ class MeshListFragment : BottomSheetDialogFragment() {
         btnSeparate?.text = "⏳  Separating…"
 
         // Progress polling on main thread via Handler
+        progressBar?.visibility = View.VISIBLE
+        progressBar?.progress = 0
+        tvProgress?.visibility = View.VISIBLE
+        tvProgress?.text = "Starting…"
+
         val progressRunnable = object : Runnable {
             override fun run() {
                 if (!separationRunning) return
                 val p = try { NativeLib.nativeGetSeparationProgress() } catch (_: Exception) { 0 }
-                btnSeparate?.text = "⏳  $p% — Separating…"
-                uiHandler.postDelayed(this, 350)
+                progressBar?.progress = p
+                tvProgress?.text = "Step %d of 6 — %d%%".format(
+                    when { p < 12 -> 1; p < 45 -> 2; p < 65 -> 3; p < 72 -> 4; p < 78 -> 5; else -> 6 }, p)
+                btnSeparate?.text = "⏳  Separating… $p%%"
+                uiHandler.postDelayed(this, 200)
             }
         }
-        uiHandler.postDelayed(progressRunnable, 350)
+        uiHandler.postDelayed(progressRunnable, 200)
 
         // CPU work on plain background Thread — no lifecycle dependency
         Thread({
@@ -240,10 +270,14 @@ class MeshListFragment : BottomSheetDialogFragment() {
                     tvIslandTitle?.text = "$finalMc"
                     if (isAdded) buildMeshList(requireContext())
                     main.updateStatusBar()
+                    progressBar?.visibility = View.GONE
+                    tvProgress?.visibility = View.GONE
                     toast("✅ $finalMc mesh islands separated!")
                 } else {
                     btnSeparate?.text = "⬡  Separate Meshes"
                     btnSeparate?.isEnabled = true
+                    progressBar?.visibility = View.GONE
+                    tvProgress?.visibility = View.GONE
                     toast("1 connected mesh — no islands to separate")
                 }
             }

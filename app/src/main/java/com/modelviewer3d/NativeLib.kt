@@ -8,15 +8,15 @@ object NativeLib {
     external fun nativeDestroy()
 
     // Model loading (two-step)
-    external fun nativeParseModel(path: String): Boolean   // IO thread
-    external fun nativeUploadParsed(): Boolean             // GL thread
-    external fun nativeLoadModel(path: String): Boolean    // legacy
+    external fun nativeParseModel(path: String): Boolean
+    external fun nativeUploadParsed(): Boolean
+    external fun nativeLoadModel(path: String): Boolean
 
-    // Separation (now fully managed in JNI bridge)
-    external fun nativePerformSeparationCPU(): Boolean     // background thread - safe
-    external fun nativePerformSeparationGPU(): Boolean     // GL thread
+    // Separation
+    external fun nativePerformSeparationCPU(): Boolean
+    external fun nativePerformSeparationGPU(): Boolean
     external fun nativeIsSeparated(): Boolean
-    external fun nativeGetSeparationProgress(): Int        // 0-100, atomic
+    external fun nativeGetSeparationProgress(): Int
 
     // Camera
     external fun nativeTouchRotate(dx: Float, dy: Float)
@@ -71,6 +71,20 @@ object NativeLib {
 
     // Screenshot
     external fun nativeTakeScreenshot(): ByteArray?
+
+    // ── Ring Deformation Tools ────────────────────────────────────────────────
+    /** Analyze ring geometry (call from GL thread). Returns false if mesh is not ring-like. */
+    external fun nativeAnalyzeRing(meshIdx: Int): Boolean
+    /** [innerRadMM, outerRadMM, bandWidthMM, innerDiaMM, outerDiaMM, heightMM] */
+    external fun nativeGetRingParams(): FloatArray
+    /** Set ring wall thickness (band width) in mm. Inner diameter unchanged. */
+    external fun nativeSetRingBandWidth(widthMM: Float)
+    /** Set ring inner diameter in mm. Band width unchanged. */
+    external fun nativeSetRingInnerDiameter(diamMM: Float)
+    /** Restore ring to shape at time of last analyzeRing() call. */
+    external fun nativeResetRingDeformation()
+    /** Returns true if a ring has been analyzed on this session. */
+    external fun nativeIsRingAnalyzed(): Boolean
 
     init { System.loadLibrary("modelviewer") }
 }

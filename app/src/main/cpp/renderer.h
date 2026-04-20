@@ -30,6 +30,21 @@ struct MeshObject {
     bool  selected=false;
 };
 
+
+// ── Ring deformation state ────────────────────────────────────────────────────
+struct RingState {
+    Vec3  center    = {0,0,0};   // centroid of ring vertices (normalized space)
+    Vec3  axis      = {0,1,0};   // unit vector through ring hole (ring normal)
+    float innerR    = 0.0f;      // inner radius, normalized units (as-analyzed)
+    float outerR    = 0.0f;      // outer radius, normalized units (as-analyzed)
+    float heightAx  = 0.0f;      // ring height along axis, normalized units
+    bool  valid     = false;
+    int   meshIdx   = -1;
+
+    // Original vertex data for reset
+    std::vector<Vertex> origVerts;
+};
+
 class Renderer {
 public:
     Renderer(); ~Renderer();
@@ -78,6 +93,14 @@ public:
     void setMeshScaleMM(int idx, float w, float h, float d);
     void getMeshSizeMM(int idx, float& w, float& h, float& d) const;
     int  getMeshVertexCount(int idx) const;
+
+    // Ring deformation tools
+    bool  analyzeRing(int meshIdx);                     // Call from GL thread
+    bool  getRingParams(float out[6]) const;            // [innerRadMM, outerRadMM, bwMM, innerDiaMM, outerDiaMM, heightMM]
+    void  setRingBandWidth(float newWidthMM);           // GL thread
+    void  setRingInnerDiameter(float newDiamMM);        // GL thread
+    void  resetRingDeformation();                        // GL thread
+    bool  isRingAnalyzed() const { return m_ring.valid; }
 
     // Separation helpers — called from JNI bridge (implementations in renderer.cpp)
 
@@ -164,7 +187,12 @@ private:
     struct Ray { Vec3 origin, dir; };
     Ray  screenToRay(float sx,float sy,float sw,float sh) const;
     bool rayTriangle(const Ray& r,const Vec3& v0,const Vec3& v1,const Vec3& v2,float& t) const;
+    void regenerateNormals(MeshObject& mo);
+    void updateMeshVBO(MeshObject& mo);
 
     // Production-grade mesh separator (reusable, preallocates buffers)
     MeshSeparator m_separator;
+
+    // Ring deformation state
+    RingState m_ring;
 };

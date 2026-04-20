@@ -257,4 +257,28 @@ JNIEXPORT jbyteArray JNICALL Java_com_modelviewer3d_NativeLib_nativeTakeScreensh
     return arr;
 }
 
+
+// ── Ring Tools ────────────────────────────────────────────────────────────────
+JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeAnalyzeRing(JNIEnv*,jclass,jint meshIdx){
+    if(!g_renderer) return JNI_FALSE;
+    return g_renderer->analyzeRing((int)meshIdx) ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT jfloatArray JNICALL Java_com_modelviewer3d_NativeLib_nativeGetRingParams(JNIEnv* env,jclass){
+    float d[6]={0,0,0,0,0,0};
+    if(g_renderer) g_renderer->getRingParams(d);
+    jfloatArray arr=env->NewFloatArray(6); env->SetFloatArrayRegion(arr,0,6,d); return arr;
+}
+JNIEXPORT void JNICALL Java_com_modelviewer3d_NativeLib_nativeSetRingBandWidth(JNIEnv*,jclass,jfloat w){
+    if(g_renderer) g_renderer->setRingBandWidth((float)w);
+}
+JNIEXPORT void JNICALL Java_com_modelviewer3d_NativeLib_nativeSetRingInnerDiameter(JNIEnv*,jclass,jfloat d){
+    if(g_renderer) g_renderer->setRingInnerDiameter((float)d);
+}
+JNIEXPORT void JNICALL Java_com_modelviewer3d_NativeLib_nativeResetRingDeformation(JNIEnv*,jclass){
+    if(g_renderer) g_renderer->resetRingDeformation();
+}
+JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeIsRingAnalyzed(JNIEnv*,jclass){
+    return (g_renderer && g_renderer->isRingAnalyzed()) ? JNI_TRUE : JNI_FALSE;
+}
+
 } // extern "C"

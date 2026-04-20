@@ -101,6 +101,20 @@
                 android:text="Ruler" android:textColor="#44BBBBCC" android:textSize="8sp" android:paddingTop="1dp"/>
         </LinearLayout>
 
+        <!-- Ring Tool -->
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="match_parent"
+            android:orientation="vertical" android:gravity="center"
+            android:paddingStart="2dp" android:paddingEnd="2dp"
+            android:id="@+id/btnRingTool" android:clickable="true" android:focusable="true"
+            android:background="?attr/selectableItemBackgroundBorderless">
+            <TextView android:layout_width="28dp" android:layout_height="28dp"
+                android:gravity="center" android:text="💍"
+                android:textSize="18sp"/>
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="Ring" android:textSize="8sp"
+                android:textColor="#9090B0" android:gravity="center"/>
+        </LinearLayout>
+
         <!-- Export -->
         <LinearLayout android:layout_width="wrap_content" android:layout_height="match_parent"
             android:orientation="vertical" android:gravity="center"

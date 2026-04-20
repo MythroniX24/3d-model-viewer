@@ -98,6 +98,7 @@ class MainActivity : AppCompatActivity() {
             findViewById<View>(R.id.btnEdit).setOnClickListener       { openEditor() }
             findViewById<View>(R.id.btnMeshList).setOnClickListener   { openMeshList() }
             btnRuler?.setOnClickListener                               { toggleRulerMode() }
+            findViewById<View>(R.id.btnRingTool).setOnClickListener      { openRingTool() }
             findViewById<View>(R.id.btnExport).setOnClickListener     { showExportSheet() }
             findViewById<View>(R.id.btnUndo).setOnClickListener       { glView.queueEvent { NativeLib.nativeUndo() } }
             findViewById<View>(R.id.btnRedo).setOnClickListener       { glView.queueEvent { NativeLib.nativeRedo() } }
@@ -510,6 +511,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ── Panels ────────────────────────────────────────────────────────────────
+    private fun openRingTool() {
+        if (supportFragmentManager.findFragmentByTag(RingToolFragment.TAG) != null) return
+        RingToolFragment.newInstance().show(supportFragmentManager, RingToolFragment.TAG)
+    }
     private fun openEditor() {
         if (supportFragmentManager.findFragmentByTag(EditorPanelFragment.TAG) != null) return
         EditorPanelFragment.newInstance().show(supportFragmentManager, EditorPanelFragment.TAG)

@@ -20,7 +20,7 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
 
     private var colR = 0.72f; private var colG = 0.72f; private var colB = 0.92f
     private var ambient = 0.3f; private var diffuse = 0.8f
-    private var uniformScale = true
+    private var uniformScale = false
 
     private var etW: EditText? = null
     private var etH: EditText? = null
@@ -154,7 +154,7 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
         }
         tvOrigDims = tvOrig
         root.addView(tvOrig)
-        root.addView(toggle("Uniform Scale (lock ratio)", true) { checked -> uniformScale = checked })
+        root.addView(toggle("Uniform Scale (lock ratio)", false) { checked -> uniformScale = checked })
 
         // Build one dimension input row
         fun mmInputRow(axLabel: String): EditText {

@@ -824,213 +824,321 @@ static void jacobiEigen3(float A[3][3], float V[3][3]) {
     for(int i=0;i<3;i++) for(int j=0;j<3;j++) V[i][j]=Vs[i][j];
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-void Renderer::regenerateNormals(MeshObject& mo){
-    for(auto& v:mo.vertices){v.nx=0;v.ny=0;v.nz=0;}
-    for(size_t i=0;i+2<mo.indices.size();i+=3){
-        auto& v0=mo.vertices[mo.indices[i+0]];
-        auto& v1=mo.vertices[mo.indices[i+1]];
-        auto& v2=mo.vertices[mo.indices[i+2]];
-        Vec3 a{v1.px-v0.px,v1.py-v0.py,v1.pz-v0.pz};
-        Vec3 b{v2.px-v0.px,v2.py-v0.py,v2.pz-v0.pz};
-        Vec3 n=a.cross(b);
-        for(int k=0;k<3;k++){
-            auto& vk=mo.vertices[mo.indices[i+k]];
-            vk.nx+=n.x;vk.ny+=n.y;vk.nz+=n.z;
+// ══════════════════════════════════════════════════════════════════════════════
+// RING DEFORMATION ENGINE  v2 — Correct additive displacement
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// ROOT CAUSE OF V1 BUG:
+//   Old code: sc = rNew/r;  v.px = center + along*axis + rad.x * sc
+//   This SCALES the full radial-plane vector by sc, which IS the right direction
+//   but operates on already-modified vertices on every slider move → cumulative
+//   distortion accumulates and destroys the geometry.
+//
+// V2 FIXES:
+//   1. Always deform from origVerts (no cumulative errors ever)
+//   2. Additive displacement: r_new = r + delta * smoothWeight(r)
+//      Vertex moves along its own radial direction by delta*weight — never scaled
+//   3. Percentile-based inner/outer radius (robust to carved/complex geometry)
+//   4. Axis detection from inner-surface verts only (stone settings can't break it)
+//   5. Smoothstep weight prevents hard edges at inner/outer boundaries
+//   6. Area-weighted smooth normals after deformation
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── smoothstep ───────────────────────────────────────────────────────────────
+static inline float smoothstep3(float edge0, float edge1, float x) {
+    float t = std::clamp((x - edge0) / (edge1 - edge0 + 1e-12f), 0.f, 1.f);
+    return t * t * (3.f - 2.f * t);   // 3t²−2t³
+}
+
+// ── Area-weighted smooth normals ─────────────────────────────────────────────
+// Each face contributes its normal weighted by face area to its 3 vertices.
+// Equivalent to accumulating unnormalised cross-products — already what
+// the old code did — but we now also handle degenerate faces gracefully.
+void Renderer::regenerateNormals(MeshObject& mo) {
+    for (auto& v : mo.vertices) { v.nx = v.ny = v.nz = 0.f; }
+    const size_t triN = mo.indices.size();
+    for (size_t i = 0; i + 2 < triN; i += 3) {
+        const auto& v0 = mo.vertices[mo.indices[i+0]];
+        const auto& v1 = mo.vertices[mo.indices[i+1]];
+        const auto& v2 = mo.vertices[mo.indices[i+2]];
+        Vec3 a{v1.px-v0.px, v1.py-v0.py, v1.pz-v0.pz};
+        Vec3 b{v2.px-v0.px, v2.py-v0.py, v2.pz-v0.pz};
+        Vec3 n = a.cross(b);   // magnitude ∝ face area — no div, just accumulate
+        for (int k = 0; k < 3; ++k) {
+            auto& vk = mo.vertices[mo.indices[i+k]];
+            vk.nx += n.x; vk.ny += n.y; vk.nz += n.z;
         }
     }
-    for(auto& v:mo.vertices){
-        float L=sqrtf(v.nx*v.nx+v.ny*v.ny+v.nz*v.nz);
-        if(L>1e-9f){v.nx/=L;v.ny/=L;v.nz/=L;}else{v.nx=0;v.ny=1;v.nz=0;}
+    for (auto& v : mo.vertices) {
+        float L = sqrtf(v.nx*v.nx + v.ny*v.ny + v.nz*v.nz);
+        if (L > 1e-12f) { v.nx /= L; v.ny /= L; v.nz /= L; }
+        else             { v.nx = 0.f; v.ny = 1.f; v.nz = 0.f; }
     }
 }
 
-void Renderer::updateMeshVBO(MeshObject& mo){
-    if(!mo.vbo||mo.vertices.empty()) return;
-    glBindBuffer(GL_ARRAY_BUFFER,mo.vbo);
-    // Use DYNAMIC_DRAW since we'll be updating repeatedly (ring sliders)
-    glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)(mo.vertices.size()*sizeof(Vertex)),
-                 mo.vertices.data(),GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER,0);
+// ── Update GPU positions + normals (positions + normals only, uvs unchanged) ─
+void Renderer::updateMeshVBO(MeshObject& mo) {
+    if (!mo.vbo || mo.vertices.empty()) return;
+    glBindBuffer(GL_ARRAY_BUFFER, mo.vbo);
+    // Full vertex buffer update — struct is interleaved (pos+norm+uv)
+    glBufferData(GL_ARRAY_BUFFER,
+                 (GLsizeiptr)(mo.vertices.size() * sizeof(Vertex)),
+                 mo.vertices.data(), GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-// ── Ring Analysis ─────────────────────────────────────────────────────────────
-// Uses PCA (Jacobi eigendecomposition) to find ring axis, then 1D k-means
-// (k=2) on radial distances to find inner/outer radii.
-bool Renderer::analyzeRing(int meshIdx){
-    if(meshIdx<0||meshIdx>=(int)m_meshes.size()) return false;
-    const auto& mo=m_meshes[meshIdx];
-    if(mo.vertices.empty()) return false;
+// ── Core radial deformation ───────────────────────────────────────────────────
+// Applies additive radial displacement from origVerts.
+// weight_outer  = smoothstep(innerR→outerR) — moves outer surface
+// weight_inner  = 1 - smoothstep(innerR→outerR) — moves inner surface
+//
+// Formulae:
+//   Band width:      r_new = r_orig + smoothstep(innerR,outerR, r_orig) * deltaOuter
+//   Inner diameter:  r_new = r_orig + (1-smoothstep(innerR,outerR, r_orig)) * deltaInner
+//
+// deltaOuter = newOuterR - origOuterR  (positive → expand outer wall)
+// deltaInner = newInnerR - origInnerR  (positive → expand hole)
+//
+// Both can be combined in one pass:
+//   r_new = r_orig
+//         + smoothstep_t      * deltaOuter
+//         + (1-smoothstep_t) * deltaInner
+void Renderer::applyRingDeformation(float newInnerN, float newOuterN) {
+    if (!m_ring.valid || m_ring.meshIdx < 0 ||
+        m_ring.meshIdx >= (int)m_meshes.size()) return;
+    if (m_ring.origVerts.empty()) return;
 
-    const size_t N=mo.vertices.size();
+    auto& mo = m_meshes[m_ring.meshIdx];
 
-    // 1. Centroid
+    // Safety: never let inner >= outer
+    newInnerN = std::min(newInnerN, newOuterN - 1e-5f);
+    newOuterN = std::max(newOuterN, newInnerN + 1e-5f);
+
+    const float origInner = m_ring.origInnerR;
+    const float origOuter = m_ring.origOuterR;
+    const float deltaOuter = newOuterN - origOuter;   // change in outer radius
+    const float deltaInner = newInnerN - origInner;   // change in inner radius
+
+    // Always work from the backup — zero cumulative error
+    mo.vertices = m_ring.origVerts;
+
+    const size_t N = mo.vertices.size();
+    const Vec3&  cen  = m_ring.center;
+    const Vec3&  axis = m_ring.axis;
+
+    for (size_t i = 0; i < N; ++i) {
+        auto& v = mo.vertices[i];
+
+        // Decompose vertex position into axial + radial components
+        Vec3 d { v.px - cen.x, v.py - cen.y, v.pz - cen.z };
+        float along = d.x*axis.x + d.y*axis.y + d.z*axis.z;
+        // radial vector (perpendicular to axis, toward vertex)
+        float rx = d.x - along*axis.x;
+        float ry = d.y - along*axis.y;
+        float rz = d.z - along*axis.z;
+        float r  = sqrtf(rx*rx + ry*ry + rz*rz);
+        if (r < 1e-12f) continue;  // vertex exactly on axis — skip
+
+        // Smooth weight: 0 at inner surface, 1 at outer surface
+        float t = smoothstep3(origInner, origOuter, r);
+
+        // Additive radial displacement: outer weight moves outer, inner weight moves inner
+        float displacement = t * deltaOuter + (1.f - t) * deltaInner;
+
+        // Move vertex along its own radial direction by displacement
+        float rNew  = r + displacement;
+        float scale = rNew / r;   // scale the radial vector only (not axial)
+
+        v.px = cen.x + along*axis.x + rx*scale;
+        v.py = cen.y + along*axis.y + ry*scale;
+        v.pz = cen.z + along*axis.z + rz*scale;
+    }
+
+    // Update live tracking
+    m_ring.currentInnerR = newInnerN;
+    m_ring.currentOuterR = newOuterN;
+
+    regenerateNormals(mo);
+    updateMeshVBO(mo);
+}
+
+// ── Ring Analysis v2 ─────────────────────────────────────────────────────────
+// Robust inner/outer detection using percentiles — immune to stone settings,
+// carvings, and asymmetric geometry that confuses simple k-means.
+bool Renderer::analyzeRing(int meshIdx) {
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return false;
+    const auto& mo = m_meshes[meshIdx];
+    const size_t N  = mo.vertices.size();
+    if (N < 64) return false;
+
+    // ── Step 1: Coarse centroid and covariance (all vertices) ─────────────────
     Vec3 cen{0,0,0};
-    for(const auto& v:mo.vertices){cen.x+=v.px;cen.y+=v.py;cen.z+=v.pz;}
-    float inv=1.f/(float)N;
-    cen.x*=inv; cen.y*=inv; cen.z*=inv;
+    for (const auto& v : mo.vertices) { cen.x+=v.px; cen.y+=v.py; cen.z+=v.pz; }
+    float invN = 1.f / (float)N;
+    cen.x*=invN; cen.y*=invN; cen.z*=invN;
 
-    // 2. Covariance matrix
-    float C[3][3]={};
-    for(const auto& v:mo.vertices){
-        float d[3]={v.px-cen.x,v.py-cen.y,v.pz-cen.z};
-        for(int i=0;i<3;i++) for(int j=0;j<3;j++) C[i][j]+=d[i]*d[j];
+    float C[3][3] = {};
+    for (const auto& v : mo.vertices) {
+        float d[3] = {v.px-cen.x, v.py-cen.y, v.pz-cen.z};
+        for (int i=0;i<3;i++) for (int j=0;j<3;j++) C[i][j] += d[i]*d[j];
+    }
+    float V[3][3]; jacobiEigen3(C, V);
+    // Smallest eigenvalue → ring axis (least variance direction = through hole)
+    Vec3 axis{V[0][0], V[1][0], V[2][0]};
+    float alen = sqrtf(axis.x*axis.x + axis.y*axis.y + axis.z*axis.z);
+    if (alen < 1e-9f) return false;
+    axis.x/=alen; axis.y/=alen; axis.z/=alen;
+
+    // ── Step 2: Compute all radial distances and axial extent ─────────────────
+    std::vector<float> radii(N);
+    float axMin = FLT_MAX, axMax = -FLT_MAX;
+    for (size_t i = 0; i < N; ++i) {
+        const auto& v = mo.vertices[i];
+        Vec3 d{v.px-cen.x, v.py-cen.y, v.pz-cen.z};
+        float along = d.x*axis.x + d.y*axis.y + d.z*axis.z;
+        axMin = std::min(axMin, along); axMax = std::max(axMax, along);
+        float rx = d.x - along*axis.x;
+        float ry = d.y - along*axis.y;
+        float rz = d.z - along*axis.z;
+        radii[i] = sqrtf(rx*rx + ry*ry + rz*rz);
     }
 
-    // 3. Jacobi decomposition → eigenvectors
-    float V[3][3];
-    jacobiEigen3(C,V);
-    // V column 0 = eigenvector with smallest eigenvalue = ring axis
-    Vec3 axis{V[0][0],V[1][0],V[2][0]};
-    float alen=sqrtf(axis.x*axis.x+axis.y*axis.y+axis.z*axis.z);
-    if(alen<1e-9f) return false;
-    axis.x/=alen;axis.y/=alen;axis.z/=alen;
+    // ── Step 3: Percentile-based robust inner/outer radius ────────────────────
+    // Using percentiles avoids k-means failure on asymmetric/carved rings.
+    // 5th percentile ≈ inner bore, 95th percentile ≈ outer surface peak.
+    std::vector<float> sortedR = radii;
+    std::sort(sortedR.begin(), sortedR.end());
+    float innerR = sortedR[(size_t)(N * 0.05f)];
+    float outerR = sortedR[(size_t)(N * 0.95f)];
 
-    // 4. Compute radial distances and axial extent
-    std::vector<float> radii; radii.reserve(N);
-    float axMin=FLT_MAX,axMax=-FLT_MAX;
-    for(const auto& v:mo.vertices){
-        Vec3 d{v.px-cen.x,v.py-cen.y,v.pz-cen.z};
-        float along=d.x*axis.x+d.y*axis.y+d.z*axis.z;
-        axMin=std::min(axMin,along); axMax=std::max(axMax,along);
-        Vec3 rad{d.x-along*axis.x,d.y-along*axis.y,d.z-along*axis.z};
-        radii.push_back(sqrtf(rad.x*rad.x+rad.y*rad.y+rad.z*rad.z));
-    }
+    // Reject if not enough spread (probably not a ring)
+    if (outerR - innerR < 1e-6f) return false;
 
-    // 5. K-means k=2 on radii to find inner/outer (Lloyd's algorithm, 1D)
-    float rMin=*std::min_element(radii.begin(),radii.end());
-    float rMax=*std::max_element(radii.begin(),radii.end());
-    if(rMax-rMin<1e-9f) return false; // degenerate
-
-    float c1=rMin,c2=rMax;
-    for(int iter=0;iter<30;iter++){
-        float s1=0,n1=0,s2=0,n2=0;
-        for(float r:radii){
-            if(fabsf(r-c1)<fabsf(r-c2)){s1+=r;n1++;}else{s2+=r;n2++;}
+    // ── Step 4: Refine axis using inner-surface vertices only ─────────────────
+    // Stone settings and carvings only affect outer geometry.
+    // The inner bore is a clean cylinder → gives the true ring axis.
+    float innerBound = innerR * 1.3f;  // 30% above inner radius
+    float refCovC[3][3] = {};
+    Vec3  innerCen{0,0,0};
+    int   nRefVerts = 0;
+    for (size_t i = 0; i < N; ++i) {
+        if (radii[i] <= innerBound) {
+            const auto& v = mo.vertices[i];
+            innerCen.x += v.px; innerCen.y += v.py; innerCen.z += v.pz;
+            ++nRefVerts;
         }
-        if(n1>0) c1=s1/n1;
-        if(n2>0) c2=s2/n2;
     }
-    if(c1>c2) std::swap(c1,c2);
-    float threshold=(c1+c2)*0.5f;
+    if (nRefVerts > 32) {
+        float invR = 1.f / (float)nRefVerts;
+        innerCen.x*=invR; innerCen.y*=invR; innerCen.z*=invR;
+        // Recompute covariance from inner verts only
+        for (size_t i = 0; i < N; ++i) {
+            if (radii[i] > innerBound) continue;
+            const auto& v = mo.vertices[i];
+            float d[3] = {v.px-innerCen.x, v.py-innerCen.y, v.pz-innerCen.z};
+            for (int ii=0;ii<3;ii++) for (int jj=0;jj<3;jj++)
+                refCovC[ii][jj] += d[ii]*d[jj];
+        }
+        float Vr[3][3]; jacobiEigen3(refCovC, Vr);
+        Vec3 refAxis{Vr[0][0], Vr[1][0], Vr[2][0]};
+        float ralen = sqrtf(refAxis.x*refAxis.x+refAxis.y*refAxis.y+refAxis.z*refAxis.z);
+        if (ralen > 1e-9f) {
+            refAxis.x/=ralen; refAxis.y/=ralen; refAxis.z/=ralen;
+            // Only use refined axis if it's reasonably aligned with coarse one
+            // (dot product > 0.7 → within 45°)
+            float dot = fabsf(refAxis.x*axis.x + refAxis.y*axis.y + refAxis.z*axis.z);
+            if (dot > 0.7f) {
+                axis = refAxis;
+                cen  = innerCen;   // use inner surface centroid — more stable
+            }
+        }
+    }
 
-    // Validate: we need BOTH inner and outer vertices
-    int nInner=0,nOuter=0;
-    for(float r:radii){if(r<threshold)nInner++;else nOuter++;}
-    if(nInner==0||nOuter==0) return false;
+    // Recompute radii with refined axis for final percentiles
+    axMin = FLT_MAX; axMax = -FLT_MAX;
+    for (size_t i = 0; i < N; ++i) {
+        const auto& v = mo.vertices[i];
+        Vec3 d{v.px-cen.x, v.py-cen.y, v.pz-cen.z};
+        float along = d.x*axis.x + d.y*axis.y + d.z*axis.z;
+        axMin = std::min(axMin, along); axMax = std::max(axMax, along);
+        float rx = d.x - along*axis.x;
+        float ry = d.y - along*axis.y;
+        float rz = d.z - along*axis.z;
+        radii[i] = sqrtf(rx*rx + ry*ry + rz*rz);
+    }
+    // Recalculate percentiles with refined axis
+    std::copy(radii.begin(), radii.end(), sortedR.begin());
+    std::sort(sortedR.begin(), sortedR.end());
+    innerR = sortedR[(size_t)(N * 0.05f)];
+    outerR = sortedR[(size_t)(N * 0.95f)];
+    if (outerR - innerR < 1e-6f) return false;
 
-    // 6. Store analysis result
-    m_ring.center   = cen;
-    m_ring.axis     = axis;
-    m_ring.innerR   = c1;
-    m_ring.outerR   = c2;
-    m_ring.heightAx = axMax-axMin;
-    m_ring.valid    = true;
-    m_ring.meshIdx  = meshIdx;
-    m_ring.origVerts= mo.vertices; // backup for reset
+    // ── Step 5: Store results ─────────────────────────────────────────────────
+    m_ring.center      = cen;
+    m_ring.axis        = axis;
+    m_ring.innerR      = innerR;
+    m_ring.outerR      = outerR;
+    m_ring.origInnerR  = innerR;
+    m_ring.origOuterR  = outerR;
+    m_ring.currentInnerR = innerR;
+    m_ring.currentOuterR = outerR;
+    m_ring.heightAx    = axMax - axMin;
+    m_ring.valid       = true;
+    m_ring.meshIdx     = meshIdx;
+    m_ring.origVerts   = mo.vertices;  // backup — deformation always starts here
 
-    LOGI("Ring analyzed: innerR=%.4f outerR=%.4f h=%.4f axis=(%.2f,%.2f,%.2f) nIn=%d nOut=%d",
-         c1,c2,m_ring.heightAx,axis.x,axis.y,axis.z,nInner,nOuter);
+    LOGI("Ring v2: innerR=%.4f outerR=%.4f h=%.4f axis=(%.3f,%.3f,%.3f) N=%zu",
+         innerR, outerR, m_ring.heightAx,
+         axis.x, axis.y, axis.z, N);
     return true;
 }
 
 // ── Get ring parameters in mm ─────────────────────────────────────────────────
 bool Renderer::getRingParams(float out[6]) const {
-    if(!m_ring.valid) return false;
-    float toMM = (m_normalizeScale>1e-9f) ? (1.f/m_normalizeScale) : 1.f;
-    float innerMM  = m_ring.innerR   * toMM;
-    float outerMM  = m_ring.outerR   * toMM;
-    float bwMM     = (m_ring.outerR - m_ring.innerR) * toMM;
-    float iDiaMM   = innerMM * 2.f;
-    float oDiaMM   = outerMM * 2.f;
-    float hMM      = m_ring.heightAx * toMM;
-    out[0]=innerMM; out[1]=outerMM; out[2]=bwMM;
-    out[3]=iDiaMM;  out[4]=oDiaMM;  out[5]=hMM;
+    if (!m_ring.valid) return false;
+    float toMM = (m_normalizeScale > 1e-9f) ? (1.f / m_normalizeScale) : 1.f;
+    float innerMM = m_ring.currentInnerR * toMM;
+    float outerMM = m_ring.currentOuterR * toMM;
+    float bwMM    = (m_ring.currentOuterR - m_ring.currentInnerR) * toMM;
+    out[0] = innerMM;     // inner radius
+    out[1] = outerMM;     // outer radius
+    out[2] = bwMM;        // band width
+    out[3] = innerMM*2.f; // inner diameter
+    out[4] = outerMM*2.f; // outer diameter
+    out[5] = m_ring.heightAx * toMM; // height
     return true;
 }
 
-// ── Ring Band Width (wall thickness) ─────────────────────────────────────────
-// Changes outer radius, keeps inner radius fixed.
-// Uses radial-fraction interpolation so face vertices stretch smoothly.
-void Renderer::setRingBandWidth(float newWidthMM){
-    if(!m_ring.valid||m_ring.meshIdx<0||m_ring.meshIdx>=(int)m_meshes.size()) return;
-    auto& mo=m_meshes[m_ring.meshIdx];
+// ── Public API ────────────────────────────────────────────────────────────────
+void Renderer::setRingBandWidth(float newWidthMM) {
+    if (!m_ring.valid) return;
+    float toNorm = (m_normalizeScale > 1e-9f) ? m_normalizeScale : 1.f;
+    float newWidthN = newWidthMM * toNorm;
+    if (newWidthN < 1e-6f) return;
+    float newOuterN = m_ring.origInnerR + newWidthN;  // outer = inner + band
+    applyRingDeformation(m_ring.origInnerR, newOuterN);
+}
 
-    // Convert to normalized units
-    float toNorm=(m_normalizeScale>1e-9f)?m_normalizeScale:1.f;
-    float newWidthN=newWidthMM*toNorm;
-    if(newWidthN<1e-6f) return;
-    float newOuterN=m_ring.innerR+newWidthN;
-    if(newOuterN<m_ring.innerR+1e-6f) return;
+void Renderer::setRingInnerDiameter(float newDiamMM) {
+    if (!m_ring.valid) return;
+    float toNorm = (m_normalizeScale > 1e-9f) ? m_normalizeScale : 1.f;
+    float newInnerN = (newDiamMM * 0.5f) * toNorm;
+    if (newInnerN < 1e-6f) return;
+    applyRingDeformation(newInnerN, m_ring.origOuterR);
+}
 
-    float span=m_ring.outerR-m_ring.innerR;
-    if(span<1e-9f) return;
-
-    for(auto& v:mo.vertices){
-        Vec3 d{v.px-m_ring.center.x,v.py-m_ring.center.y,v.pz-m_ring.center.z};
-        float along=d.x*m_ring.axis.x+d.y*m_ring.axis.y+d.z*m_ring.axis.z;
-        Vec3 rad{d.x-along*m_ring.axis.x,d.y-along*m_ring.axis.y,d.z-along*m_ring.axis.z};
-        float r=sqrtf(rad.x*rad.x+rad.y*rad.y+rad.z*rad.z);
-        if(r<1e-9f) continue;
-        // Radial fraction 0=inner, 1=outer (clamped for robustness)
-        float f=std::clamp((r-m_ring.innerR)/span, 0.f, 1.f);
-        float rNew=m_ring.innerR + f*(newOuterN-m_ring.innerR);
-        float sc=rNew/r;
-        v.px=m_ring.center.x+along*m_ring.axis.x+rad.x*sc;
-        v.py=m_ring.center.y+along*m_ring.axis.y+rad.y*sc;
-        v.pz=m_ring.center.z+along*m_ring.axis.z+rad.z*sc;
-    }
-    m_ring.outerR=newOuterN;
+void Renderer::resetRingDeformation() {
+    if (!m_ring.valid || m_ring.meshIdx < 0 ||
+        m_ring.meshIdx >= (int)m_meshes.size()) return;
+    if (m_ring.origVerts.empty()) return;
+    auto& mo = m_meshes[m_ring.meshIdx];
+    mo.vertices = m_ring.origVerts;
+    m_ring.currentInnerR = m_ring.origInnerR;
+    m_ring.currentOuterR = m_ring.origOuterR;
     regenerateNormals(mo);
     updateMeshVBO(mo);
 }
 
-// ── Ring Inner Diameter ───────────────────────────────────────────────────────
-// Changes inner radius only. Outer radius (band) stays fixed.
-// Same interpolation — inner edge moves, outer stays, face verts interpolate.
-void Renderer::setRingInnerDiameter(float newDiamMM){
-    if(!m_ring.valid||m_ring.meshIdx<0||m_ring.meshIdx>=(int)m_meshes.size()) return;
-    auto& mo=m_meshes[m_ring.meshIdx];
-
-    float toNorm=(m_normalizeScale>1e-9f)?m_normalizeScale:1.f;
-    float newInnerN=(newDiamMM*0.5f)*toNorm;
-    if(newInnerN<1e-6f) return;
-    // Prevent inner overtaking outer
-    if(newInnerN>=m_ring.outerR-1e-5f) newInnerN=m_ring.outerR-1e-5f;
-
-    float span=m_ring.outerR-m_ring.innerR;
-    if(span<1e-9f) return;
-
-    for(auto& v:mo.vertices){
-        Vec3 d{v.px-m_ring.center.x,v.py-m_ring.center.y,v.pz-m_ring.center.z};
-        float along=d.x*m_ring.axis.x+d.y*m_ring.axis.y+d.z*m_ring.axis.z;
-        Vec3 rad{d.x-along*m_ring.axis.x,d.y-along*m_ring.axis.y,d.z-along*m_ring.axis.z};
-        float r=sqrtf(rad.x*rad.x+rad.y*rad.y+rad.z*rad.z);
-        if(r<1e-9f) continue;
-        float f=std::clamp((r-m_ring.innerR)/span, 0.f, 1.f);
-        // inner moves to newInnerN, outer stays at outerR
-        float rNew=newInnerN + f*(m_ring.outerR-newInnerN);
-        float sc=rNew/r;
-        v.px=m_ring.center.x+along*m_ring.axis.x+rad.x*sc;
-        v.py=m_ring.center.y+along*m_ring.axis.y+rad.y*sc;
-        v.pz=m_ring.center.z+along*m_ring.axis.z+rad.z*sc;
-    }
-    m_ring.innerR=newInnerN;
-    regenerateNormals(mo);
-    updateMeshVBO(mo);
-}
-
-// ── Reset ring deformation ────────────────────────────────────────────────────
-void Renderer::resetRingDeformation(){
-    if(!m_ring.valid||m_ring.meshIdx<0||m_ring.meshIdx>=(int)m_meshes.size()) return;
-    auto& mo=m_meshes[m_ring.meshIdx];
-    if(m_ring.origVerts.empty()) return;
-    mo.vertices=m_ring.origVerts;
-    regenerateNormals(mo);
-    updateMeshVBO(mo);
-    // Re-analyze to reset stored radii
-    analyzeRing(m_ring.meshIdx);
-}
 
 // ── Raycasting ───────────────────────────────────────────────────────────────
 Renderer::Ray Renderer::screenToRay(float sx,float sy,float sw,float sh) const {

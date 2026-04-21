@@ -33,15 +33,26 @@ struct MeshObject {
 
 // ── Ring deformation state ────────────────────────────────────────────────────
 struct RingState {
-    Vec3  center    = {0,0,0};   // centroid of ring vertices (normalized space)
-    Vec3  axis      = {0,1,0};   // unit vector through ring hole (ring normal)
-    float innerR    = 0.0f;      // inner radius, normalized units (as-analyzed)
-    float outerR    = 0.0f;      // outer radius, normalized units (as-analyzed)
-    float heightAx  = 0.0f;      // ring height along axis, normalized units
+    Vec3  center      = {0,0,0};   // centroid (normalized space)
+    Vec3  axis        = {0,1,0};   // ring hole axis (unit vector)
+
+    // Set once at analyzeRing() — never modified afterwards
+    float origInnerR  = 0.0f;
+    float origOuterR  = 0.0f;
+
+    // Aliases matching analysis result (same as orig after analyze, before deform)
+    float innerR      = 0.0f;   // legacy compat
+    float outerR      = 0.0f;   // legacy compat
+    float heightAx    = 0.0f;
+
+    // Live tracking of current deformation state
+    float currentInnerR = 0.0f;
+    float currentOuterR = 0.0f;
+
     bool  valid     = false;
     int   meshIdx   = -1;
 
-    // Original vertex data for reset
+    // Original vertex snapshot — deformation ALWAYS starts from here
     std::vector<Vertex> origVerts;
 };
 
@@ -189,6 +200,7 @@ private:
     bool rayTriangle(const Ray& r,const Vec3& v0,const Vec3& v1,const Vec3& v2,float& t) const;
     void regenerateNormals(MeshObject& mo);
     void updateMeshVBO(MeshObject& mo);
+    void applyRingDeformation(float newInnerN, float newOuterN);
 
     // Production-grade mesh separator (reusable, preallocates buffers)
     MeshSeparator m_separator;

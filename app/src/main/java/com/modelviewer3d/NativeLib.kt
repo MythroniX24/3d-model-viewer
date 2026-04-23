@@ -84,7 +84,17 @@ object NativeLib {
     /** Restore ring to shape at time of last analyzeRing() call. */
     external fun nativeResetRingDeformation()
     /** Returns true if a ring has been analyzed on this session. */
-    external fun nativeIsRingAnalyzed(): Boolean
+    external fun nativeIsRingAnalyzed(): Boolean}
+
+    // ── Mesh Processing (MeshLab/OpenSCAD Inspired) ─────────────────────────
+    /** Quadric Error Metric decimation. targetPercent: 0.1=10% of faces remain */
+    external fun nativeDecimateMesh(meshIdx: Int, targetPercent: Float): Boolean
+    /** [surfaceAreaMM2, volumeMM3, bboxW, bboxH, bboxD, verts, tris, edges, watertight] */
+    external fun nativeGetMeshStats(meshIdx: Int): FloatArray
+    /** Weld vertices closer than epsilonMM together */
+    external fun nativeWeldVertices(meshIdx: Int, epsilonMM: Float): Int
+    /** Remove zero-area / degenerate triangles */
+    external fun nativeRemoveZeroAreaFaces(meshIdx: Int): Int
 
     init { System.loadLibrary("modelviewer") }
 }

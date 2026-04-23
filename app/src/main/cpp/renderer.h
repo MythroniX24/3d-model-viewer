@@ -32,6 +32,18 @@ struct MeshObject {
 
 
 // ── Ring deformation state ────────────────────────────────────────────────────
+
+// ── Mesh Statistics ───────────────────────────────────────────────────────────
+struct MeshStats {
+    float surfaceAreaMM2 = 0.f;
+    float volumeMM3      = 0.f;
+    float bboxW = 0.f, bboxH = 0.f, bboxD = 0.f;
+    int   vertCount  = 0;
+    int   triCount   = 0;
+    int   edgeCount  = 0;
+    bool  isWatertight = false;
+};
+
 struct RingState {
     Vec3  center      = {0,0,0};   // centroid (normalized space)
     Vec3  axis        = {0,1,0};   // ring hole axis (unit vector)
@@ -104,6 +116,12 @@ public:
     void setMeshScaleMM(int idx, float w, float h, float d);
     void getMeshSizeMM(int idx, float& w, float& h, float& d) const;
     int  getMeshVertexCount(int idx) const;
+
+    // ── Mesh processing (MeshLab/OpenSCAD inspired) ───────────────────────────
+    bool decimateMesh(int meshIdx, float targetPercent);   // Garland-Heckbert QEM
+    void getMeshStats(int meshIdx, MeshStats& out) const;  // area, vol, bbox
+    int  weldVertices(int meshIdx, float epsilonMM);       // merge close verts
+    int  removeZeroAreaFaces(int meshIdx);                 // remove degenerate tris
 
     // Ring deformation tools
     bool  analyzeRing(int meshIdx);                     // Call from GL thread

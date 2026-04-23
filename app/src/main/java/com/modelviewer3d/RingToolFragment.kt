@@ -168,7 +168,12 @@ class RingToolFragment : BottomSheetDialogFragment() {
                 if (ringAnalyzed && v != lastBWMM) {
                     lastBWMM = v
                     glRun { NativeLib.nativeSetRingBandWidth(v) }
-                    activity?.runOnUiThread { updateBwInfo(v) }
+                    activity?.runOnUiThread {
+                        updateBwInfo(v)
+                        // Notify EditorPanel to refresh its dimension display
+                        activity?.sendBroadcast(
+                            android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+                    }
                 }
             }
         )
@@ -188,7 +193,11 @@ class RingToolFragment : BottomSheetDialogFragment() {
                 if (ringAnalyzed && v != lastIDMM) {
                     lastIDMM = v
                     glRun { NativeLib.nativeSetRingInnerDiameter(v) }
-                    activity?.runOnUiThread { updateIdInfo(v) }
+                    activity?.runOnUiThread {
+                        updateIdInfo(v)
+                        activity?.sendBroadcast(
+                            android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+                    }
                 }
             }
         )

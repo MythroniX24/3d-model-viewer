@@ -7,6 +7,10 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.view.*
 import android.widget.*
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 
 class EditorPanelFragment : BottomSheetDialogFragment() {
@@ -361,6 +365,49 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
 
     companion object {
         const val TAG = "EditorPanel"
+        const val ACTION_DIMS_CHANGED = "com.modelviewer3d.DIMS_CHANGED"
         fun newInstance() = EditorPanelFragment()
+    }
+
+    // Refresh dimensions whenever ring tool or any other tool changes model geometry
+    private val dimsChangedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            refreshDimensions()
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter(ACTION_DIMS_CHANGED)
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            requireContext().registerReceiver(dimsChangedReceiver, filter,
+                Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            requireContext().registerReceiver(dimsChangedReceiver, filter)
+        }
+        refreshDimensions()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try { requireContext().unregisterReceiver(dimsChangedReceiver) } catch (_: Exception) {}
+    }
+
+    /** Re-fetch current model dimensions from GL thread and update fields */
+    fun refreshDimensions() {
+        (activity as? MainActivity)?.glView?.queueEvent {
+            try {
+                val s = NativeLib.nativeGetModelSizeMM()
+                val ow = s[0]; val oh = s[1]; val od = s[2]
+                val cw = s[3]; val ch = s[4]; val cd = s[5]
+                activity?.runOnUiThread {
+                    origWmm = ow; origHmm = oh; origDmm = od
+                    curWmm  = cw; curHmm  = ch; curDmm  = cd
+                    tvOrigDims?.text = "Original: %.1f × %.1f × %.1f mm".format(ow, oh, od)
+                    silentSet(etW, cw); silentSet(etH, ch); silentSet(etD, cd)
+                }
+            } catch (_: Exception) {}
+        }
     }
 }

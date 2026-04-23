@@ -281,4 +281,26 @@ JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeIsRingAnalyzed
     return (g_renderer && g_renderer->isRingAnalyzed()) ? JNI_TRUE : JNI_FALSE;
 }
 
+
+// ── Mesh Processing (MeshLab/OpenSCAD Inspired) ───────────────────────────────
+JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeDecimateMesh(JNIEnv*,jclass,jint idx,jfloat pct){
+    if(!g_renderer) return JNI_FALSE;
+    return g_renderer->decimateMesh((int)idx,(float)pct) ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT jfloatArray JNICALL Java_com_modelviewer3d_NativeLib_nativeGetMeshStats(JNIEnv* env,jclass,jint idx){
+    // returns [surfaceAreaMM2, volumeMM3, bboxW, bboxH, bboxD, vertCount, triCount, edgeCount, isWatertight]
+    MeshStats s;
+    if(g_renderer) g_renderer->getMeshStats((int)idx, s);
+    float d[9]={s.surfaceAreaMM2, s.volumeMM3, s.bboxW, s.bboxH, s.bboxD,
+                (float)s.vertCount, (float)s.triCount, (float)s.edgeCount,
+                s.isWatertight?1.f:0.f};
+    jfloatArray arr=env->NewFloatArray(9); env->SetFloatArrayRegion(arr,0,9,d); return arr;
+}
+JNIEXPORT jint JNICALL Java_com_modelviewer3d_NativeLib_nativeWeldVertices(JNIEnv*,jclass,jint idx,jfloat epsMM){
+    return g_renderer ? (jint)g_renderer->weldVertices((int)idx,(float)epsMM) : 0;
+}
+JNIEXPORT jint JNICALL Java_com_modelviewer3d_NativeLib_nativeRemoveZeroAreaFaces(JNIEnv*,jclass,jint idx){
+    return g_renderer ? (jint)g_renderer->removeZeroAreaFaces((int)idx) : 0;
+}
+
 } // extern "C"

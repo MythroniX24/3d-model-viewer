@@ -1,6 +1,7 @@
 package com.modelviewer3d
 
 import android.Manifest
+import android.content.Intent
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -99,6 +100,7 @@ class MainActivity : AppCompatActivity() {
             findViewById<View>(R.id.btnMeshList).setOnClickListener   { openMeshList() }
             btnRuler?.setOnClickListener                               { toggleRulerMode() }
             findViewById<View>(R.id.btnRingTool).setOnClickListener      { openRingTool() }
+            findViewById<View>(R.id.btnMeshTools).setOnClickListener     { openMeshTools() }
             findViewById<View>(R.id.btnExport).setOnClickListener     { showExportSheet() }
             findViewById<View>(R.id.btnUndo).setOnClickListener       { glView.queueEvent { NativeLib.nativeUndo() } }
             findViewById<View>(R.id.btnRedo).setOnClickListener       { glView.queueEvent { NativeLib.nativeRedo() } }
@@ -514,6 +516,10 @@ class MainActivity : AppCompatActivity() {
     private fun openRingTool() {
         if (supportFragmentManager.findFragmentByTag(RingToolFragment.TAG) != null) return
         RingToolFragment.newInstance().show(supportFragmentManager, RingToolFragment.TAG)
+    }
+    private fun openMeshTools() {
+        if (supportFragmentManager.findFragmentByTag(MeshToolsFragment.TAG) != null) return
+        MeshToolsFragment.newInstance().show(supportFragmentManager, MeshToolsFragment.TAG)
     }
     private fun openEditor() {
         if (supportFragmentManager.findFragmentByTag(EditorPanelFragment.TAG) != null) return

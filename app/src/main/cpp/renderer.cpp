@@ -9,6 +9,10 @@
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <set>
+#include <map>
+#include <numeric>
+#include <functional>
 #include <numeric>
 // unordered_map removed — using MeshSeparator now
 
@@ -767,6 +771,416 @@ bool Renderer::exportSTL(const std::string& path) const {
 
 
 // ══════════════════════════════════════════════════════════════════════════════
+// MESH PROCESSING ENGINE
+// Algorithms derived from MeshLab (Quadric Simplification) and
+// OpenSCAD (edge detection, winding, polygon validation) principles.
+// Adapted as self-contained C++ for Android NDK (no VCG/CGAL dependency).
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Symmetric 4×4 quadric matrix (Garland-Heckbert 1997) ─────────────────────
+// Stores Q = Σ(plane_i^T * plane_i) for each vertex.
+// plane = [a,b,c,d] where ax+by+cz+d=0.
+// Q is symmetric: only 10 unique entries stored.
+struct Quadric4 {
+    double a2,ab,ac,ad, b2,bc,bd, c2,cd, d2;
+    Quadric4() : a2(0),ab(0),ac(0),ad(0),b2(0),bc(0),bd(0),c2(0),cd(0),d2(0) {}
+
+    void addPlane(float a, float b, float c, float d) {
+        a2+=a*a; ab+=a*b; ac+=a*c; ad+=a*d;
+        b2+=b*b; bc+=b*c; bd+=b*d;
+        c2+=c*c; cd+=c*d;
+        d2+=d*d;
+    }
+    void operator+=(const Quadric4& o) {
+        a2+=o.a2; ab+=o.ab; ac+=o.ac; ad+=o.ad;
+        b2+=o.b2; bc+=o.bc; bd+=o.bd;
+        c2+=o.c2; cd+=o.cd;
+        d2+=o.d2;
+    }
+    // Evaluate quadric error for point (x,y,z)
+    double eval(float x, float y, float z) const {
+        double v = a2*x*x + 2*ab*x*y + 2*ac*x*z + 2*ad*x
+                 + b2*y*y + 2*bc*y*z + 2*bd*y
+                 + c2*z*z + 2*cd*z
+                 + d2;
+        return v < 0.0 ? 0.0 : v;
+    }
+    // Optimal collapse position: solve 3x3 linear system
+    // [2a2  2ab  2ac] [x]   [-2ad]
+    // [2ab  2b2  2bc] [y] = [-2bd]
+    // [2ac  2bc  2c2] [z]   [-2cd]
+    bool optimalPosition(float& ox, float& oy, float& oz) const {
+        // Cramer's rule on the 3x3 system
+        double det = 2*(2*a2*(b2*c2 - bc*bc) - 2*ab*(ab*c2 - bc*ac) + 2*ac*(ab*bc - b2*ac));
+        if (std::fabs(det) < 1e-15) return false;
+        double invDet = 1.0 / det;
+        ox = (float)((-2*ad*(b2*c2-bc*bc) + 2*ab*(bd*c2-bc*cd) - 2*ac*(bd*bc-b2*cd)) * invDet);
+        oy = (float)((2*a2*(-bd*c2+cd*bc) + (-2*ad)*(ab*c2-bc*ac) + 2*ac*(ab*cd-bd*ac)) * invDet);
+        oz = (float)((2*a2*(bc*bd-b2*cd) - 2*ab*(ab*bd-bd*ac) + (-2*ad)*(ab*bc-b2*ac)) * invDet);
+        return true;
+    }
+};
+
+// ── Quadric Error Metric Mesh Decimation ──────────────────────────────────────
+// Based on: Garland & Heckbert "Surface Simplification Using Quadric Error Metrics"
+// Adapted from MeshLab's quadric_simp.cpp algorithm.
+//
+// Steps:
+// 1. Compute per-vertex quadric: sum of face-plane quadrics at all adjacent faces
+// 2. For each edge, compute collapse cost = Q(v1)+Q(v2) evaluated at optimal point
+// 3. Priority queue: collapse minimum-cost edge, update neighbors, repeat
+// 4. Stop at targetFaceCount
+//
+// This is O(n log n) using a priority queue.
+bool Renderer::decimateMesh(int meshIdx, float targetPercent) {
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return false;
+    auto& mo = m_meshes[meshIdx];
+    const size_t N  = mo.vertices.size();
+    const size_t nT = mo.indices.size() / 3;
+    if (N < 4 || nT < 2) return false;
+
+    size_t targetFaces = std::max((size_t)4, (size_t)(nT * targetPercent));
+    if (targetFaces >= nT) return true;  // nothing to do
+
+    LOGI("Decimating mesh %d: %zu tris → %zu tris (%.0f%%)",
+         meshIdx, nT, targetFaces, targetPercent*100.f);
+
+    // Build adjacency: vertex → list of face indices
+    std::vector<std::vector<uint32_t>> v2f(N);
+    for (size_t i = 0; i < nT; i++) {
+        v2f[mo.indices[i*3+0]].push_back((uint32_t)i);
+        v2f[mo.indices[i*3+1]].push_back((uint32_t)i);
+        v2f[mo.indices[i*3+2]].push_back((uint32_t)i);
+    }
+
+    // Compute per-vertex quadrics from adjacent face planes
+    std::vector<Quadric4> Q(N);
+    std::vector<bool> faceAlive(nT, true);
+    std::vector<bool> vertAlive(N, true);
+
+    auto addFaceToQuadrics = [&](size_t fi) {
+        uint32_t i0=mo.indices[fi*3+0], i1=mo.indices[fi*3+1], i2=mo.indices[fi*3+2];
+        const auto& v0=mo.vertices[i0]; const auto& v1=mo.vertices[i1]; const auto& v2=mo.vertices[i2];
+        float ax=v1.px-v0.px, ay=v1.py-v0.py, az=v1.pz-v0.pz;
+        float bx=v2.px-v0.px, by=v2.py-v0.py, bz=v2.pz-v0.pz;
+        float nx=ay*bz-az*by, ny=az*bx-ax*bz, nz=ax*by-ay*bx;
+        float len=sqrtf(nx*nx+ny*ny+nz*nz);
+        if (len<1e-12f) return;
+        nx/=len; ny/=len; nz/=len;
+        float d = -(nx*v0.px + ny*v0.py + nz*v0.pz);
+        Q[i0].addPlane(nx,ny,nz,d);
+        Q[i1].addPlane(nx,ny,nz,d);
+        Q[i2].addPlane(nx,ny,nz,d);
+    };
+    for (size_t i=0;i<nT;i++) addFaceToQuadrics(i);
+
+    // Compute edge collapse cost
+    struct EdgeCollapse {
+        double cost; uint32_t v1,v2; float ox,oy,oz;
+        bool operator>(const EdgeCollapse& o) const { return cost > o.cost; }
+    };
+
+    auto computeCollapse = [&](uint32_t a, uint32_t b) -> EdgeCollapse {
+        EdgeCollapse ec; ec.v1=a; ec.v2=b;
+        Quadric4 qab = Q[a]; qab += Q[b];
+        float mx=(mo.vertices[a].px+mo.vertices[b].px)*0.5f;
+        float my=(mo.vertices[a].py+mo.vertices[b].py)*0.5f;
+        float mz=(mo.vertices[a].pz+mo.vertices[b].pz)*0.5f;
+        if (!qab.optimalPosition(ec.ox, ec.oy, ec.oz)) { ec.ox=mx; ec.oy=my; ec.oz=mz; }
+        ec.cost = qab.eval(ec.ox, ec.oy, ec.oz);
+        return ec;
+    };
+
+    // Build edge set (unique undirected edges)
+    std::set<std::pair<uint32_t,uint32_t>> edgeSet;
+    for (size_t i=0;i<nT;i++) {
+        for (int k=0;k<3;k++) {
+            uint32_t a=mo.indices[i*3+k], b=mo.indices[i*3+(k+1)%3];
+            if (a>b) std::swap(a,b);
+            edgeSet.insert({a,b});
+        }
+    }
+
+    // Priority queue: min cost first
+    std::priority_queue<EdgeCollapse, std::vector<EdgeCollapse>, std::greater<EdgeCollapse>> pq;
+    for (auto& e : edgeSet) pq.push(computeCollapse(e.first, e.second));
+
+    // Collapse loop
+    size_t liveFaces = nT;
+    std::vector<uint32_t> remap(N);
+    std::iota(remap.begin(), remap.end(), 0u);  // identity
+
+    // Find canonical vertex (path-compressed union-find)
+    std::function<uint32_t(uint32_t)> root = [&](uint32_t x) -> uint32_t {
+        while (remap[x] != x) { remap[x]=remap[remap[x]]; x=remap[x]; }
+        return x;
+    };
+
+    int iters=0, maxIters=(int)(nT*3);
+    while (liveFaces > targetFaces && !pq.empty() && iters++ < maxIters) {
+        EdgeCollapse ec = pq.top(); pq.pop();
+        uint32_t a = root(ec.v1), b = root(ec.v2);
+        if (a==b) continue;
+        if (!vertAlive[a] || !vertAlive[b]) continue;
+
+        // Perform collapse: merge b into a, place a at optimal position
+        mo.vertices[a].px = ec.ox;
+        mo.vertices[a].py = ec.oy;
+        mo.vertices[a].pz = ec.oz;
+        Q[a] += Q[b];
+        remap[b] = a;
+        vertAlive[b] = false;
+
+        // Rewrite faces: replace b with a, mark degenerate faces dead
+        for (uint32_t fi : v2f[b]) {
+            if (!faceAlive[fi]) continue;
+            bool hasDegen = false;
+            for (int k=0;k<3;k++) {
+                uint32_t rv = root(mo.indices[fi*3+k]);
+                mo.indices[fi*3+k] = rv;
+            }
+            // Degenerate if any two vertices equal
+            if (mo.indices[fi*3+0]==mo.indices[fi*3+1] ||
+                mo.indices[fi*3+1]==mo.indices[fi*3+2] ||
+                mo.indices[fi*3+0]==mo.indices[fi*3+2]) {
+                faceAlive[fi]=false; --liveFaces; hasDegen=true;
+            }
+            if (!hasDegen) v2f[a].push_back(fi);
+        }
+
+        // Push new collapse candidates for a's edges
+        std::set<uint32_t> neighbors;
+        for (uint32_t fi : v2f[a]) {
+            if (!faceAlive[fi]) continue;
+            for (int k=0;k<3;k++) {
+                uint32_t nb = root(mo.indices[fi*3+k]);
+                if (nb != a) neighbors.insert(nb);
+            }
+        }
+        for (uint32_t nb : neighbors) {
+            if (vertAlive[nb]) pq.push(computeCollapse(a, nb));
+        }
+    }
+
+    // Compact: rebuild vertex + index arrays removing dead entries
+    std::vector<uint32_t> newIdx(N, UINT32_MAX);
+    std::vector<Vertex> newVerts;
+    newVerts.reserve(liveFaces * 2);
+    for (size_t i=0;i<N;i++) {
+        if (vertAlive[i] && root((uint32_t)i)==(uint32_t)i) {
+            newIdx[i] = (uint32_t)newVerts.size();
+            newVerts.push_back(mo.vertices[i]);
+        }
+    }
+    std::vector<unsigned int> newFaces;
+    newFaces.reserve(liveFaces*3);
+    for (size_t i=0;i<nT;i++) {
+        if (!faceAlive[i]) continue;
+        uint32_t ia=root(mo.indices[i*3+0]);
+        uint32_t ib=root(mo.indices[i*3+1]);
+        uint32_t ic=root(mo.indices[i*3+2]);
+        if (newIdx[ia]==UINT32_MAX||newIdx[ib]==UINT32_MAX||newIdx[ic]==UINT32_MAX) continue;
+        if (ia==ib||ib==ic||ia==ic) continue;
+        newFaces.push_back(newIdx[ia]);
+        newFaces.push_back(newIdx[ib]);
+        newFaces.push_back(newIdx[ic]);
+    }
+
+    mo.vertices = std::move(newVerts);
+    mo.indices  = std::move(newFaces);
+
+    // Rebuild GPU buffers
+    if (mo.vao) glDeleteVertexArrays(1,&mo.vao);
+    if (mo.vbo) glDeleteBuffers(1,&mo.vbo);
+    if (mo.ibo) glDeleteBuffers(1,&mo.ibo);
+    mo.vao=mo.vbo=mo.ibo=0; mo.gpuReady=false;
+    uploadMeshObject(mo);
+
+    regenerateNormals(mo);
+    updateMeshVBO(mo);
+
+    LOGI("Decimation done: %zu→%zu verts, %zu→%zu tris",
+         N, mo.vertices.size(), nT, mo.indices.size()/3);
+    return true;
+}
+
+// ── Mesh Statistics (MeshLab-style) ──────────────────────────────────────────
+// Computes: surface area, enclosed volume (signed, using divergence theorem),
+// bounding box dims, edge count, and watertight check.
+void Renderer::getMeshStats(int meshIdx, MeshStats& out) const {
+    out = MeshStats{};
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return;
+    const auto& mo = m_meshes[meshIdx];
+    const size_t nT = mo.indices.size() / 3;
+    if (mo.vertices.empty()) return;
+
+    float toMM = (m_normalizeScale>1e-9f) ? (1.f/m_normalizeScale) : 1.f;
+
+    // Bounding box
+    float mnX=FLT_MAX,mnY=FLT_MAX,mnZ=FLT_MAX;
+    float mxX=-FLT_MAX,mxY=-FLT_MAX,mxZ=-FLT_MAX;
+    for (const auto& v : mo.vertices) {
+        mnX=std::min(mnX,v.px); mxX=std::max(mxX,v.px);
+        mnY=std::min(mnY,v.py); mxY=std::max(mxY,v.py);
+        mnZ=std::min(mnZ,v.pz); mxZ=std::max(mxZ,v.pz);
+    }
+    out.bboxW = (mxX-mnX)*toMM;
+    out.bboxH = (mxY-mnY)*toMM;
+    out.bboxD = (mxZ-mnZ)*toMM;
+    out.vertCount = (int)mo.vertices.size();
+    out.triCount  = (int)nT;
+
+    // Surface area + signed volume (divergence theorem)
+    // area = Σ |e1 × e2| / 2
+    // vol  = Σ (v0 · (v1 × v2)) / 6
+    double area = 0, vol = 0;
+    // Edge count (unique) and manifold check
+    std::map<std::pair<uint32_t,uint32_t>,int> edgeCnt;
+    for (size_t i=0;i<nT;i++) {
+        uint32_t i0=mo.indices[i*3+0], i1=mo.indices[i*3+1], i2=mo.indices[i*3+2];
+        const auto& v0=mo.vertices[i0]; const auto& v1=mo.vertices[i1]; const auto& v2=mo.vertices[i2];
+        float ax=v1.px-v0.px, ay=v1.py-v0.py, az=v1.pz-v0.pz;
+        float bx=v2.px-v0.px, by=v2.py-v0.py, bz=v2.pz-v0.pz;
+        float cx=ay*bz-az*by, cy=az*bx-ax*bz, cz=ax*by-ay*bx;
+        area += sqrtf(cx*cx+cy*cy+cz*cz) * 0.5;
+        vol  += (v0.px*(double)(v1.py*v2.pz-v1.pz*v2.py)
+               + v0.py*(double)(v1.pz*v2.px-v1.px*v2.pz)
+               + v0.pz*(double)(v1.px*v2.py-v1.py*v2.px)) / 6.0;
+        // Edge manifold check
+        for (int k=0;k<3;k++) {
+            uint32_t ea=mo.indices[i*3+k], eb=mo.indices[i*3+(k+1)%3];
+            edgeCnt[{ea,eb}]++;
+        }
+    }
+    // Convert to mm² and mm³
+    double toMM2 = (double)toMM*(double)toMM;
+    double toMM3 = toMM2*(double)toMM;
+    out.surfaceAreaMM2 = (float)(area * toMM2);
+    out.volumeMM3      = (float)(std::fabs(vol) * toMM3);
+    out.edgeCount      = (int)edgeCnt.size();
+
+    // Watertight = every edge appears exactly twice (once in each direction)
+    out.isWatertight = true;
+    for (auto& kv : edgeCnt) {
+        if (kv.second != 1) { out.isWatertight = false; break; }
+        // Check reverse edge
+        auto rev = edgeCnt.find({kv.first.second, kv.first.first});
+        if (rev == edgeCnt.end() || rev->second != 1) { out.isWatertight=false; break; }
+    }
+}
+
+// ── Duplicate Vertex Weld (from OpenSCAD RemoveDuplicateVertex principle) ─────
+// Merges vertices closer than epsilon using a spatial hash grid.
+// Prevents z-fighting, fixes cracked seams.
+int Renderer::weldVertices(int meshIdx, float epsilonMM) {
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return 0;
+    auto& mo = m_meshes[meshIdx];
+    if (mo.vertices.empty()) return 0;
+
+    float toNorm = (m_normalizeScale>1e-9f) ? m_normalizeScale : 1.f;
+    float eps    = epsilonMM * toNorm;
+    float cellSz = eps * 2.f;
+
+    // Spatial hash: quantize position to grid, group nearby vertices
+    using Cell = std::tuple<int,int,int>;
+    struct CellHash {
+        size_t operator()(const Cell& c) const {
+            size_t h = 2166136261u;
+            h ^= std::get<0>(c)*16777619u; h *= 16777619u;
+            h ^= std::get<1>(c)*2246822519u; h *= 2246822519u;
+            h ^= std::get<2>(c)*3266489917u;
+            return h;
+        }
+    };
+    std::unordered_map<Cell,std::vector<uint32_t>,CellHash> grid;
+    const size_t N = mo.vertices.size();
+    for (size_t i=0;i<N;i++) {
+        const auto& v = mo.vertices[i];
+        int cx=(int)std::floor(v.px/cellSz);
+        int cy=(int)std::floor(v.py/cellSz);
+        int cz=(int)std::floor(v.pz/cellSz);
+        grid[{cx,cy,cz}].push_back((uint32_t)i);
+    }
+
+    std::vector<uint32_t> remap(N);
+    std::iota(remap.begin(), remap.end(), 0u);
+    int merged=0;
+
+    for (auto& kv : grid) {
+        auto& group = kv.second;
+        for (size_t a=0;a<group.size();a++) {
+            for (size_t b=a+1;b<group.size();b++) {
+                uint32_t ia=group[a], ib=group[b];
+                const auto& va=mo.vertices[ia]; const auto& vb=mo.vertices[ib];
+                float dx=va.px-vb.px, dy=va.py-vb.py, dz=va.pz-vb.pz;
+                if (sqrtf(dx*dx+dy*dy+dz*dz) < eps) {
+                    remap[ib]=ia; merged++;
+                }
+            }
+        }
+    }
+    if (merged==0) return 0;
+
+    // Path-compress remap
+    for (size_t i=0;i<N;i++) {
+        while (remap[remap[i]] != remap[i]) remap[i]=remap[remap[i]];
+    }
+
+    // Rebuild compact vertex+index arrays
+    std::vector<uint32_t> newIdx(N, UINT32_MAX);
+    std::vector<Vertex>   newVerts;
+    for (size_t i=0;i<N;i++) {
+        if (remap[i]==i) { newIdx[i]=(uint32_t)newVerts.size(); newVerts.push_back(mo.vertices[i]); }
+    }
+    for (auto& idx : mo.indices) {
+        idx = newIdx[remap[idx]];
+    }
+    mo.vertices = std::move(newVerts);
+
+    // Rebuild GPU
+    if (mo.vao) glDeleteVertexArrays(1,&mo.vao);
+    if (mo.vbo) glDeleteBuffers(1,&mo.vbo);
+    if (mo.ibo) glDeleteBuffers(1,&mo.ibo);
+    mo.vao=mo.vbo=mo.ibo=0; mo.gpuReady=false;
+    uploadMeshObject(mo);
+    regenerateNormals(mo);
+    updateMeshVBO(mo);
+
+    LOGI("WeldVertices mesh %d: merged %d duplicates", meshIdx, merged);
+    return merged;
+}
+
+// ── Zero-area face removal ─────────────────────────────────────────────────────
+// From MeshLab's RemoveFaceOutOfRangeArea / OpenSCAD degenerate polygon removal
+int Renderer::removeZeroAreaFaces(int meshIdx) {
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return 0;
+    auto& mo = m_meshes[meshIdx];
+    const size_t nT = mo.indices.size()/3;
+    std::vector<unsigned int> newIdx;
+    newIdx.reserve(nT*3);
+    int removed=0;
+    for (size_t i=0;i<nT;i++) {
+        uint32_t i0=mo.indices[i*3+0], i1=mo.indices[i*3+1], i2=mo.indices[i*3+2];
+        if (i0==i1||i1==i2||i0==i2) { removed++; continue; }
+        const auto& v0=mo.vertices[i0]; const auto& v1=mo.vertices[i1]; const auto& v2=mo.vertices[i2];
+        float ax=v1.px-v0.px, ay=v1.py-v0.py, az=v1.pz-v0.pz;
+        float bx=v2.px-v0.px, by=v2.py-v0.py, bz=v2.pz-v0.pz;
+        float cx=ay*bz-az*by, cy=az*bx-ax*bz, cz=ax*by-ay*bx;
+        if (cx*cx+cy*cy+cz*cz < 1e-20f) { removed++; continue; }
+        newIdx.push_back(i0); newIdx.push_back(i1); newIdx.push_back(i2);
+    }
+    if (removed>0) {
+        mo.indices = std::move(newIdx);
+        regenerateNormals(mo);
+        updateMeshVBO(mo);
+        LOGI("RemoveZeroArea mesh %d: removed %d degenerate faces", meshIdx, removed);
+    }
+    return removed;
+}
+
+
+
+// ══════════════════════════════════════════════════════════════════════════════
 // RING DEFORMATION ENGINE
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -823,6 +1237,416 @@ static void jacobiEigen3(float A[3][3], float V[3][3]) {
     for(int i=0;i<3;i++) for(int j=0;j<3;j++) Vs[j][i]=V[j][idx[i]];
     for(int i=0;i<3;i++) for(int j=0;j<3;j++) V[i][j]=Vs[i][j];
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MESH PROCESSING ENGINE
+// Algorithms derived from MeshLab (Quadric Simplification) and
+// OpenSCAD (edge detection, winding, polygon validation) principles.
+// Adapted as self-contained C++ for Android NDK (no VCG/CGAL dependency).
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Symmetric 4×4 quadric matrix (Garland-Heckbert 1997) ─────────────────────
+// Stores Q = Σ(plane_i^T * plane_i) for each vertex.
+// plane = [a,b,c,d] where ax+by+cz+d=0.
+// Q is symmetric: only 10 unique entries stored.
+struct Quadric4 {
+    double a2,ab,ac,ad, b2,bc,bd, c2,cd, d2;
+    Quadric4() : a2(0),ab(0),ac(0),ad(0),b2(0),bc(0),bd(0),c2(0),cd(0),d2(0) {}
+
+    void addPlane(float a, float b, float c, float d) {
+        a2+=a*a; ab+=a*b; ac+=a*c; ad+=a*d;
+        b2+=b*b; bc+=b*c; bd+=b*d;
+        c2+=c*c; cd+=c*d;
+        d2+=d*d;
+    }
+    void operator+=(const Quadric4& o) {
+        a2+=o.a2; ab+=o.ab; ac+=o.ac; ad+=o.ad;
+        b2+=o.b2; bc+=o.bc; bd+=o.bd;
+        c2+=o.c2; cd+=o.cd;
+        d2+=o.d2;
+    }
+    // Evaluate quadric error for point (x,y,z)
+    double eval(float x, float y, float z) const {
+        double v = a2*x*x + 2*ab*x*y + 2*ac*x*z + 2*ad*x
+                 + b2*y*y + 2*bc*y*z + 2*bd*y
+                 + c2*z*z + 2*cd*z
+                 + d2;
+        return v < 0.0 ? 0.0 : v;
+    }
+    // Optimal collapse position: solve 3x3 linear system
+    // [2a2  2ab  2ac] [x]   [-2ad]
+    // [2ab  2b2  2bc] [y] = [-2bd]
+    // [2ac  2bc  2c2] [z]   [-2cd]
+    bool optimalPosition(float& ox, float& oy, float& oz) const {
+        // Cramer's rule on the 3x3 system
+        double det = 2*(2*a2*(b2*c2 - bc*bc) - 2*ab*(ab*c2 - bc*ac) + 2*ac*(ab*bc - b2*ac));
+        if (std::fabs(det) < 1e-15) return false;
+        double invDet = 1.0 / det;
+        ox = (float)((-2*ad*(b2*c2-bc*bc) + 2*ab*(bd*c2-bc*cd) - 2*ac*(bd*bc-b2*cd)) * invDet);
+        oy = (float)((2*a2*(-bd*c2+cd*bc) + (-2*ad)*(ab*c2-bc*ac) + 2*ac*(ab*cd-bd*ac)) * invDet);
+        oz = (float)((2*a2*(bc*bd-b2*cd) - 2*ab*(ab*bd-bd*ac) + (-2*ad)*(ab*bc-b2*ac)) * invDet);
+        return true;
+    }
+};
+
+// ── Quadric Error Metric Mesh Decimation ──────────────────────────────────────
+// Based on: Garland & Heckbert "Surface Simplification Using Quadric Error Metrics"
+// Adapted from MeshLab's quadric_simp.cpp algorithm.
+//
+// Steps:
+// 1. Compute per-vertex quadric: sum of face-plane quadrics at all adjacent faces
+// 2. For each edge, compute collapse cost = Q(v1)+Q(v2) evaluated at optimal point
+// 3. Priority queue: collapse minimum-cost edge, update neighbors, repeat
+// 4. Stop at targetFaceCount
+//
+// This is O(n log n) using a priority queue.
+bool Renderer::decimateMesh(int meshIdx, float targetPercent) {
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return false;
+    auto& mo = m_meshes[meshIdx];
+    const size_t N  = mo.vertices.size();
+    const size_t nT = mo.indices.size() / 3;
+    if (N < 4 || nT < 2) return false;
+
+    size_t targetFaces = std::max((size_t)4, (size_t)(nT * targetPercent));
+    if (targetFaces >= nT) return true;  // nothing to do
+
+    LOGI("Decimating mesh %d: %zu tris → %zu tris (%.0f%%)",
+         meshIdx, nT, targetFaces, targetPercent*100.f);
+
+    // Build adjacency: vertex → list of face indices
+    std::vector<std::vector<uint32_t>> v2f(N);
+    for (size_t i = 0; i < nT; i++) {
+        v2f[mo.indices[i*3+0]].push_back((uint32_t)i);
+        v2f[mo.indices[i*3+1]].push_back((uint32_t)i);
+        v2f[mo.indices[i*3+2]].push_back((uint32_t)i);
+    }
+
+    // Compute per-vertex quadrics from adjacent face planes
+    std::vector<Quadric4> Q(N);
+    std::vector<bool> faceAlive(nT, true);
+    std::vector<bool> vertAlive(N, true);
+
+    auto addFaceToQuadrics = [&](size_t fi) {
+        uint32_t i0=mo.indices[fi*3+0], i1=mo.indices[fi*3+1], i2=mo.indices[fi*3+2];
+        const auto& v0=mo.vertices[i0]; const auto& v1=mo.vertices[i1]; const auto& v2=mo.vertices[i2];
+        float ax=v1.px-v0.px, ay=v1.py-v0.py, az=v1.pz-v0.pz;
+        float bx=v2.px-v0.px, by=v2.py-v0.py, bz=v2.pz-v0.pz;
+        float nx=ay*bz-az*by, ny=az*bx-ax*bz, nz=ax*by-ay*bx;
+        float len=sqrtf(nx*nx+ny*ny+nz*nz);
+        if (len<1e-12f) return;
+        nx/=len; ny/=len; nz/=len;
+        float d = -(nx*v0.px + ny*v0.py + nz*v0.pz);
+        Q[i0].addPlane(nx,ny,nz,d);
+        Q[i1].addPlane(nx,ny,nz,d);
+        Q[i2].addPlane(nx,ny,nz,d);
+    };
+    for (size_t i=0;i<nT;i++) addFaceToQuadrics(i);
+
+    // Compute edge collapse cost
+    struct EdgeCollapse {
+        double cost; uint32_t v1,v2; float ox,oy,oz;
+        bool operator>(const EdgeCollapse& o) const { return cost > o.cost; }
+    };
+
+    auto computeCollapse = [&](uint32_t a, uint32_t b) -> EdgeCollapse {
+        EdgeCollapse ec; ec.v1=a; ec.v2=b;
+        Quadric4 qab = Q[a]; qab += Q[b];
+        float mx=(mo.vertices[a].px+mo.vertices[b].px)*0.5f;
+        float my=(mo.vertices[a].py+mo.vertices[b].py)*0.5f;
+        float mz=(mo.vertices[a].pz+mo.vertices[b].pz)*0.5f;
+        if (!qab.optimalPosition(ec.ox, ec.oy, ec.oz)) { ec.ox=mx; ec.oy=my; ec.oz=mz; }
+        ec.cost = qab.eval(ec.ox, ec.oy, ec.oz);
+        return ec;
+    };
+
+    // Build edge set (unique undirected edges)
+    std::set<std::pair<uint32_t,uint32_t>> edgeSet;
+    for (size_t i=0;i<nT;i++) {
+        for (int k=0;k<3;k++) {
+            uint32_t a=mo.indices[i*3+k], b=mo.indices[i*3+(k+1)%3];
+            if (a>b) std::swap(a,b);
+            edgeSet.insert({a,b});
+        }
+    }
+
+    // Priority queue: min cost first
+    std::priority_queue<EdgeCollapse, std::vector<EdgeCollapse>, std::greater<EdgeCollapse>> pq;
+    for (auto& e : edgeSet) pq.push(computeCollapse(e.first, e.second));
+
+    // Collapse loop
+    size_t liveFaces = nT;
+    std::vector<uint32_t> remap(N);
+    std::iota(remap.begin(), remap.end(), 0u);  // identity
+
+    // Find canonical vertex (path-compressed union-find)
+    std::function<uint32_t(uint32_t)> root = [&](uint32_t x) -> uint32_t {
+        while (remap[x] != x) { remap[x]=remap[remap[x]]; x=remap[x]; }
+        return x;
+    };
+
+    int iters=0, maxIters=(int)(nT*3);
+    while (liveFaces > targetFaces && !pq.empty() && iters++ < maxIters) {
+        EdgeCollapse ec = pq.top(); pq.pop();
+        uint32_t a = root(ec.v1), b = root(ec.v2);
+        if (a==b) continue;
+        if (!vertAlive[a] || !vertAlive[b]) continue;
+
+        // Perform collapse: merge b into a, place a at optimal position
+        mo.vertices[a].px = ec.ox;
+        mo.vertices[a].py = ec.oy;
+        mo.vertices[a].pz = ec.oz;
+        Q[a] += Q[b];
+        remap[b] = a;
+        vertAlive[b] = false;
+
+        // Rewrite faces: replace b with a, mark degenerate faces dead
+        for (uint32_t fi : v2f[b]) {
+            if (!faceAlive[fi]) continue;
+            bool hasDegen = false;
+            for (int k=0;k<3;k++) {
+                uint32_t rv = root(mo.indices[fi*3+k]);
+                mo.indices[fi*3+k] = rv;
+            }
+            // Degenerate if any two vertices equal
+            if (mo.indices[fi*3+0]==mo.indices[fi*3+1] ||
+                mo.indices[fi*3+1]==mo.indices[fi*3+2] ||
+                mo.indices[fi*3+0]==mo.indices[fi*3+2]) {
+                faceAlive[fi]=false; --liveFaces; hasDegen=true;
+            }
+            if (!hasDegen) v2f[a].push_back(fi);
+        }
+
+        // Push new collapse candidates for a's edges
+        std::set<uint32_t> neighbors;
+        for (uint32_t fi : v2f[a]) {
+            if (!faceAlive[fi]) continue;
+            for (int k=0;k<3;k++) {
+                uint32_t nb = root(mo.indices[fi*3+k]);
+                if (nb != a) neighbors.insert(nb);
+            }
+        }
+        for (uint32_t nb : neighbors) {
+            if (vertAlive[nb]) pq.push(computeCollapse(a, nb));
+        }
+    }
+
+    // Compact: rebuild vertex + index arrays removing dead entries
+    std::vector<uint32_t> newIdx(N, UINT32_MAX);
+    std::vector<Vertex> newVerts;
+    newVerts.reserve(liveFaces * 2);
+    for (size_t i=0;i<N;i++) {
+        if (vertAlive[i] && root((uint32_t)i)==(uint32_t)i) {
+            newIdx[i] = (uint32_t)newVerts.size();
+            newVerts.push_back(mo.vertices[i]);
+        }
+    }
+    std::vector<unsigned int> newFaces;
+    newFaces.reserve(liveFaces*3);
+    for (size_t i=0;i<nT;i++) {
+        if (!faceAlive[i]) continue;
+        uint32_t ia=root(mo.indices[i*3+0]);
+        uint32_t ib=root(mo.indices[i*3+1]);
+        uint32_t ic=root(mo.indices[i*3+2]);
+        if (newIdx[ia]==UINT32_MAX||newIdx[ib]==UINT32_MAX||newIdx[ic]==UINT32_MAX) continue;
+        if (ia==ib||ib==ic||ia==ic) continue;
+        newFaces.push_back(newIdx[ia]);
+        newFaces.push_back(newIdx[ib]);
+        newFaces.push_back(newIdx[ic]);
+    }
+
+    mo.vertices = std::move(newVerts);
+    mo.indices  = std::move(newFaces);
+
+    // Rebuild GPU buffers
+    if (mo.vao) glDeleteVertexArrays(1,&mo.vao);
+    if (mo.vbo) glDeleteBuffers(1,&mo.vbo);
+    if (mo.ibo) glDeleteBuffers(1,&mo.ibo);
+    mo.vao=mo.vbo=mo.ibo=0; mo.gpuReady=false;
+    uploadMeshObject(mo);
+
+    regenerateNormals(mo);
+    updateMeshVBO(mo);
+
+    LOGI("Decimation done: %zu→%zu verts, %zu→%zu tris",
+         N, mo.vertices.size(), nT, mo.indices.size()/3);
+    return true;
+}
+
+// ── Mesh Statistics (MeshLab-style) ──────────────────────────────────────────
+// Computes: surface area, enclosed volume (signed, using divergence theorem),
+// bounding box dims, edge count, and watertight check.
+void Renderer::getMeshStats(int meshIdx, MeshStats& out) const {
+    out = MeshStats{};
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return;
+    const auto& mo = m_meshes[meshIdx];
+    const size_t nT = mo.indices.size() / 3;
+    if (mo.vertices.empty()) return;
+
+    float toMM = (m_normalizeScale>1e-9f) ? (1.f/m_normalizeScale) : 1.f;
+
+    // Bounding box
+    float mnX=FLT_MAX,mnY=FLT_MAX,mnZ=FLT_MAX;
+    float mxX=-FLT_MAX,mxY=-FLT_MAX,mxZ=-FLT_MAX;
+    for (const auto& v : mo.vertices) {
+        mnX=std::min(mnX,v.px); mxX=std::max(mxX,v.px);
+        mnY=std::min(mnY,v.py); mxY=std::max(mxY,v.py);
+        mnZ=std::min(mnZ,v.pz); mxZ=std::max(mxZ,v.pz);
+    }
+    out.bboxW = (mxX-mnX)*toMM;
+    out.bboxH = (mxY-mnY)*toMM;
+    out.bboxD = (mxZ-mnZ)*toMM;
+    out.vertCount = (int)mo.vertices.size();
+    out.triCount  = (int)nT;
+
+    // Surface area + signed volume (divergence theorem)
+    // area = Σ |e1 × e2| / 2
+    // vol  = Σ (v0 · (v1 × v2)) / 6
+    double area = 0, vol = 0;
+    // Edge count (unique) and manifold check
+    std::map<std::pair<uint32_t,uint32_t>,int> edgeCnt;
+    for (size_t i=0;i<nT;i++) {
+        uint32_t i0=mo.indices[i*3+0], i1=mo.indices[i*3+1], i2=mo.indices[i*3+2];
+        const auto& v0=mo.vertices[i0]; const auto& v1=mo.vertices[i1]; const auto& v2=mo.vertices[i2];
+        float ax=v1.px-v0.px, ay=v1.py-v0.py, az=v1.pz-v0.pz;
+        float bx=v2.px-v0.px, by=v2.py-v0.py, bz=v2.pz-v0.pz;
+        float cx=ay*bz-az*by, cy=az*bx-ax*bz, cz=ax*by-ay*bx;
+        area += sqrtf(cx*cx+cy*cy+cz*cz) * 0.5;
+        vol  += (v0.px*(double)(v1.py*v2.pz-v1.pz*v2.py)
+               + v0.py*(double)(v1.pz*v2.px-v1.px*v2.pz)
+               + v0.pz*(double)(v1.px*v2.py-v1.py*v2.px)) / 6.0;
+        // Edge manifold check
+        for (int k=0;k<3;k++) {
+            uint32_t ea=mo.indices[i*3+k], eb=mo.indices[i*3+(k+1)%3];
+            edgeCnt[{ea,eb}]++;
+        }
+    }
+    // Convert to mm² and mm³
+    double toMM2 = (double)toMM*(double)toMM;
+    double toMM3 = toMM2*(double)toMM;
+    out.surfaceAreaMM2 = (float)(area * toMM2);
+    out.volumeMM3      = (float)(std::fabs(vol) * toMM3);
+    out.edgeCount      = (int)edgeCnt.size();
+
+    // Watertight = every edge appears exactly twice (once in each direction)
+    out.isWatertight = true;
+    for (auto& kv : edgeCnt) {
+        if (kv.second != 1) { out.isWatertight = false; break; }
+        // Check reverse edge
+        auto rev = edgeCnt.find({kv.first.second, kv.first.first});
+        if (rev == edgeCnt.end() || rev->second != 1) { out.isWatertight=false; break; }
+    }
+}
+
+// ── Duplicate Vertex Weld (from OpenSCAD RemoveDuplicateVertex principle) ─────
+// Merges vertices closer than epsilon using a spatial hash grid.
+// Prevents z-fighting, fixes cracked seams.
+int Renderer::weldVertices(int meshIdx, float epsilonMM) {
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return 0;
+    auto& mo = m_meshes[meshIdx];
+    if (mo.vertices.empty()) return 0;
+
+    float toNorm = (m_normalizeScale>1e-9f) ? m_normalizeScale : 1.f;
+    float eps    = epsilonMM * toNorm;
+    float cellSz = eps * 2.f;
+
+    // Spatial hash: quantize position to grid, group nearby vertices
+    using Cell = std::tuple<int,int,int>;
+    struct CellHash {
+        size_t operator()(const Cell& c) const {
+            size_t h = 2166136261u;
+            h ^= std::get<0>(c)*16777619u; h *= 16777619u;
+            h ^= std::get<1>(c)*2246822519u; h *= 2246822519u;
+            h ^= std::get<2>(c)*3266489917u;
+            return h;
+        }
+    };
+    std::unordered_map<Cell,std::vector<uint32_t>,CellHash> grid;
+    const size_t N = mo.vertices.size();
+    for (size_t i=0;i<N;i++) {
+        const auto& v = mo.vertices[i];
+        int cx=(int)std::floor(v.px/cellSz);
+        int cy=(int)std::floor(v.py/cellSz);
+        int cz=(int)std::floor(v.pz/cellSz);
+        grid[{cx,cy,cz}].push_back((uint32_t)i);
+    }
+
+    std::vector<uint32_t> remap(N);
+    std::iota(remap.begin(), remap.end(), 0u);
+    int merged=0;
+
+    for (auto& kv : grid) {
+        auto& group = kv.second;
+        for (size_t a=0;a<group.size();a++) {
+            for (size_t b=a+1;b<group.size();b++) {
+                uint32_t ia=group[a], ib=group[b];
+                const auto& va=mo.vertices[ia]; const auto& vb=mo.vertices[ib];
+                float dx=va.px-vb.px, dy=va.py-vb.py, dz=va.pz-vb.pz;
+                if (sqrtf(dx*dx+dy*dy+dz*dz) < eps) {
+                    remap[ib]=ia; merged++;
+                }
+            }
+        }
+    }
+    if (merged==0) return 0;
+
+    // Path-compress remap
+    for (size_t i=0;i<N;i++) {
+        while (remap[remap[i]] != remap[i]) remap[i]=remap[remap[i]];
+    }
+
+    // Rebuild compact vertex+index arrays
+    std::vector<uint32_t> newIdx(N, UINT32_MAX);
+    std::vector<Vertex>   newVerts;
+    for (size_t i=0;i<N;i++) {
+        if (remap[i]==i) { newIdx[i]=(uint32_t)newVerts.size(); newVerts.push_back(mo.vertices[i]); }
+    }
+    for (auto& idx : mo.indices) {
+        idx = newIdx[remap[idx]];
+    }
+    mo.vertices = std::move(newVerts);
+
+    // Rebuild GPU
+    if (mo.vao) glDeleteVertexArrays(1,&mo.vao);
+    if (mo.vbo) glDeleteBuffers(1,&mo.vbo);
+    if (mo.ibo) glDeleteBuffers(1,&mo.ibo);
+    mo.vao=mo.vbo=mo.ibo=0; mo.gpuReady=false;
+    uploadMeshObject(mo);
+    regenerateNormals(mo);
+    updateMeshVBO(mo);
+
+    LOGI("WeldVertices mesh %d: merged %d duplicates", meshIdx, merged);
+    return merged;
+}
+
+// ── Zero-area face removal ─────────────────────────────────────────────────────
+// From MeshLab's RemoveFaceOutOfRangeArea / OpenSCAD degenerate polygon removal
+int Renderer::removeZeroAreaFaces(int meshIdx) {
+    if (meshIdx < 0 || meshIdx >= (int)m_meshes.size()) return 0;
+    auto& mo = m_meshes[meshIdx];
+    const size_t nT = mo.indices.size()/3;
+    std::vector<unsigned int> newIdx;
+    newIdx.reserve(nT*3);
+    int removed=0;
+    for (size_t i=0;i<nT;i++) {
+        uint32_t i0=mo.indices[i*3+0], i1=mo.indices[i*3+1], i2=mo.indices[i*3+2];
+        if (i0==i1||i1==i2||i0==i2) { removed++; continue; }
+        const auto& v0=mo.vertices[i0]; const auto& v1=mo.vertices[i1]; const auto& v2=mo.vertices[i2];
+        float ax=v1.px-v0.px, ay=v1.py-v0.py, az=v1.pz-v0.pz;
+        float bx=v2.px-v0.px, by=v2.py-v0.py, bz=v2.pz-v0.pz;
+        float cx=ay*bz-az*by, cy=az*bx-ax*bz, cz=ax*by-ay*bx;
+        if (cx*cx+cy*cy+cz*cz < 1e-20f) { removed++; continue; }
+        newIdx.push_back(i0); newIdx.push_back(i1); newIdx.push_back(i2);
+    }
+    if (removed>0) {
+        mo.indices = std::move(newIdx);
+        regenerateNormals(mo);
+        updateMeshVBO(mo);
+        LOGI("RemoveZeroArea mesh %d: removed %d degenerate faces", meshIdx, removed);
+    }
+    return removed;
+}
+
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // RING DEFORMATION ENGINE  v3 — Mathematically correct texture-preserving resize

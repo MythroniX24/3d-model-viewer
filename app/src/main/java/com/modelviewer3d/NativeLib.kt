@@ -1,18 +1,18 @@
 package com.modelviewer3d
 
 object NativeLib {
-    // Core
+    // Core lifecycle
     external fun nativeInit(width: Int, height: Int)
     external fun nativeResize(width: Int, height: Int)
     external fun nativeDraw()
     external fun nativeDestroy()
 
-    // Model loading (two-step)
+    // Model loading (two-step parse → upload)
     external fun nativeParseModel(path: String): Boolean
     external fun nativeUploadParsed(): Boolean
     external fun nativeLoadModel(path: String): Boolean
 
-    // Separation
+    // Mesh separation
     external fun nativePerformSeparationCPU(): Boolean
     external fun nativePerformSeparationGPU(): Boolean
     external fun nativeIsSeparated(): Boolean
@@ -73,25 +73,19 @@ object NativeLib {
     external fun nativeTakeScreenshot(): ByteArray?
 
     // ── Ring Deformation Tools ────────────────────────────────────────────────
-    /** Analyze ring geometry (call from GL thread). Returns false if mesh is not ring-like. */
     external fun nativeAnalyzeRing(meshIdx: Int): Boolean
-    /** [innerRadMM, outerRadMM, bandWidthMM, innerDiaMM, outerDiaMM, heightMM] */
     external fun nativeGetRingParams(): FloatArray
-    /** Set ring wall thickness (band width) in mm. Inner diameter unchanged. */
     external fun nativeSetRingBandWidth(widthMM: Float)
-    /** Set ring inner diameter in mm. Band width unchanged. */
     external fun nativeSetRingInnerDiameter(diamMM: Float)
-    /** Restore ring to shape at time of last analyzeRing() call. */
     external fun nativeResetRingDeformation()
-    /** Returns true if a ring has been analyzed on this session. */
-    external fun nativeIsRingAnalyzed(): Boolean}
+    external fun nativeIsRingAnalyzed(): Boolean
 
-    // ── Mesh Processing (MeshLab/OpenSCAD Inspired) ─────────────────────────
-    /** Quadric Error Metric decimation. targetPercent: 0.1=10% of faces remain */
+    // ── Mesh Processing (MeshLab/OpenSCAD Inspired) ───────────────────────────
+    /** Quadric Error Metric decimation. targetPercent: 0.1 = 10% of faces remain */
     external fun nativeDecimateMesh(meshIdx: Int, targetPercent: Float): Boolean
-    /** [surfaceAreaMM2, volumeMM3, bboxW, bboxH, bboxD, verts, tris, edges, watertight] */
+    /** [surfaceAreaMM2, volumeMM3, bboxW, bboxH, bboxD, verts, tris, edges, watertight(0/1)] */
     external fun nativeGetMeshStats(meshIdx: Int): FloatArray
-    /** Weld vertices closer than epsilonMM together */
+    /** Merge vertices closer than epsilonMM */
     external fun nativeWeldVertices(meshIdx: Int, epsilonMM: Float): Int
     /** Remove zero-area / degenerate triangles */
     external fun nativeRemoveZeroAreaFaces(meshIdx: Int): Int

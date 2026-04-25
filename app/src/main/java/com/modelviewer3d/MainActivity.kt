@@ -3,7 +3,6 @@ package com.modelviewer3d
 import android.Manifest
 import android.content.Intent
 import android.content.ContentValues
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaScannerConnection

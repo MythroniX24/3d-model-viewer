@@ -9,18 +9,40 @@ class ModelRenderer : GLSurfaceView.Renderer {
 
     var onFpsUpdate: ((Float) -> Unit)? = null
 
+    /** True after our FIRST onSurfaceCreated within the lifetime of this Renderer.
+     *  A subsequent onSurfaceCreated means the EGL context was DESTROYED and
+     *  re-created (typical when preserveEGLContextOnPause fails, or the GPU
+     *  driver issued a context reset) — every GL handle on the C++ side is
+     *  now garbage and must be rebuilt from CPU buffers. */
+    private var hadPreviousContext = false
     private var contextInitialized = false
+    private var contextLostPending = false
     private var frameCount = 0
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        if (hadPreviousContext) {
+            // EGL context was destroyed & recreated — flag rebuild.
+            // We call nativeOnContextLost from onSurfaceChanged (after we
+            // know the new framebuffer size) so the lock ordering matches
+            // the rest of the JNI surface.
+            contextLostPending = true
+            Log.i(TAG, "Surface re-created — EGL context lost, will rebuild")
+        } else {
+            Log.i(TAG, "Surface created (first time)")
+        }
         contextInitialized = false
-        Log.i(TAG, "Surface created")
+        hadPreviousContext = true
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
         if (!contextInitialized) {
             try {
+                if (contextLostPending) {
+                    NativeLib.nativeOnContextLost()
+                    contextLostPending = false
+                }
                 NativeLib.nativeInit(width, height)
+                NativeLib.nativeRebuildContext()  // no-op if no meshes were loaded yet
                 contextInitialized = true
                 Log.i(TAG, "nativeInit ${width}x${height}")
             } catch (e: Exception) {

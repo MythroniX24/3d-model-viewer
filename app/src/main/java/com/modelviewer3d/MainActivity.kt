@@ -19,6 +19,7 @@ import android.view.WindowManager
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.PopupMenu
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
@@ -53,6 +54,32 @@ class MainActivity : AppCompatActivity() {
     private var tvStatusVerts: TextView? = null
     private var tvStatusFile: TextView? = null
 
+    // Selection chip
+    private var selectionChip: View? = null
+    private var tvSelectionLabel: TextView? = null
+
+    // Bottom-toolbar tool buttons
+    private var btnToolSelect: View? = null
+    private var btnToolMove:   View? = null
+    private var btnToolRotate: View? = null
+    private var btnToolScale:  View? = null
+    private var btnToolRing:   View? = null
+
+    private var icToolSelect: ImageView? = null
+    private var icToolMove:   ImageView? = null
+    private var icToolRotate: ImageView? = null
+    private var icToolScale:  ImageView? = null
+    private var icToolRing:   ImageView? = null
+    private var lblToolSelect: TextView? = null
+    private var lblToolMove:   TextView? = null
+    private var lblToolRotate: TextView? = null
+    private var lblToolScale:  TextView? = null
+    private var lblToolRing:   TextView? = null
+
+    private enum class Tool { NONE, SELECT, MOVE, ROTATE, SCALE, RING }
+    private var activeTool: Tool = Tool.NONE
+    private var selectedMeshIdx: Int = -1
+
     private var rulerPoint1: FloatArray? = null
     private var rulerPoint2: FloatArray? = null
     private var rulerActive = false
@@ -86,27 +113,97 @@ class MainActivity : AppCompatActivity() {
             tvStatusVerts    = findViewById(R.id.tvStatusVerts)
             tvStatusFile     = findViewById(R.id.tvStatusFile)
 
+            selectionChip     = findViewById(R.id.selectionChip)
+            tvSelectionLabel  = findViewById(R.id.tvSelectionLabel)
+
+            btnToolSelect = findViewById(R.id.btnToolSelect)
+            btnToolMove   = findViewById(R.id.btnToolMove)
+            btnToolRotate = findViewById(R.id.btnToolRotate)
+            btnToolScale  = findViewById(R.id.btnToolScale)
+            btnToolRing   = findViewById(R.id.btnToolRing)
+            icToolSelect = findViewById(R.id.icToolSelect)
+            icToolMove   = findViewById(R.id.icToolMove)
+            icToolRotate = findViewById(R.id.icToolRotate)
+            icToolScale  = findViewById(R.id.icToolScale)
+            icToolRing   = findViewById(R.id.icToolRing)
+            lblToolSelect = findViewById(R.id.lblToolSelect)
+            lblToolMove   = findViewById(R.id.lblToolMove)
+            lblToolRotate = findViewById(R.id.lblToolRotate)
+            lblToolScale  = findViewById(R.id.lblToolScale)
+            lblToolRing   = findViewById(R.id.lblToolRing)
+
             renderer = ModelRenderer()
             renderer.onFpsUpdate = { fps ->
                 runOnUiThread { tvFps?.text = "%.0f".format(fps) }
             }
             glView.attachRenderer(renderer)
             glView.onRulerPick = { pt -> onRulerPointPicked(pt) }
+            // Long-press selection: pick → toast → broadcast so any open
+            // editor (Transform Tool, Ring Tool, …) re-targets the new mesh.
+            glView.onMeshLongPressPick = { idx -> onMeshLongPressPicked(idx) }
 
-            // Toolbar wiring
+            // ── LEGACY toolbar wiring (these views are now hidden in the
+            //    layout; the overflow ⋯ menu and bottom toolbar trigger them
+            //    via View.performClick(). The wiring stays identical so all
+            //    existing features keep working unchanged.) ──────────────────
             findViewById<View>(R.id.btnOpen).setOnClickListener       { requestOpenFile() }
             findViewById<View>(R.id.btnEdit).setOnClickListener       { openEditor() }
             findViewById<View>(R.id.btnMeshList).setOnClickListener   { openMeshList() }
-            btnRuler?.setOnClickListener                               { toggleRulerMode() }
-            findViewById<View>(R.id.btnRingTool).setOnClickListener      { openRingTool() }
-            findViewById<View>(R.id.btnMeshTools).setOnClickListener     { openMeshTools() }
+            btnRuler?.setOnClickListener                              { toggleRulerMode() }
+            findViewById<View>(R.id.btnRingTool).setOnClickListener   { openRingTool() }
+            findViewById<View>(R.id.btnMeshTools).setOnClickListener  { openMeshTools() }
             findViewById<View>(R.id.btnExport).setOnClickListener     { showExportSheet() }
-            findViewById<View>(R.id.btnUndo).setOnClickListener       { glView.queueEvent { NativeLib.nativeUndo() } }
-            findViewById<View>(R.id.btnRedo).setOnClickListener       { glView.queueEvent { NativeLib.nativeRedo() } }
             findViewById<View>(R.id.btnScreenshot).setOnClickListener { takeScreenshot() }
-            findViewById<View>(R.id.btnReset).setOnClickListener      { glView.queueEvent { NativeLib.nativeResetCamera() } }
+
+            // ── Top-bar primary actions ──────────────────────────────────────
+            findViewById<View>(R.id.btnUndo).setOnClickListener {
+                glView.queueEvent { NativeLib.nativeUndo() }
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    sendBroadcast(android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+                }, 80)
+            }
+            findViewById<View>(R.id.btnRedo).setOnClickListener {
+                glView.queueEvent { NativeLib.nativeRedo() }
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    sendBroadcast(android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+                }, 80)
+            }
+            findViewById<View>(R.id.btnReset).setOnClickListener {
+                glView.queueEvent {
+                    NativeLib.nativeResetAllTransforms()
+                    NativeLib.nativeResetCamera()
+                }
+                // Notify editor panel to refresh its dimension display
+                sendBroadcast(android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+            }
+
+            // ── Top-bar overflow menu ────────────────────────────────────────
+            findViewById<View>(R.id.btnOverflow).setOnClickListener { showOverflowMenu(it) }
+
+            // ── Bottom-toolbar tool buttons ──────────────────────────────────
+            btnToolSelect?.setOnClickListener { onToolClicked(Tool.SELECT) }
+            btnToolMove  ?.setOnClickListener { onToolClicked(Tool.MOVE)   }
+            btnToolRotate?.setOnClickListener { onToolClicked(Tool.ROTATE) }
+            btnToolScale ?.setOnClickListener { onToolClicked(Tool.SCALE)  }
+            btnToolRing  ?.setOnClickListener { onToolClicked(Tool.RING)   }
+
+            // ── Selection chip ───────────────────────────────────────────────
+            findViewById<View?>(R.id.btnSelectionClear)?.setOnClickListener { clearSelection() }
+
+            // ── Misc ─────────────────────────────────────────────────────────
             findViewById<View?>(R.id.btnClearRuler)?.setOnClickListener { clearRuler() }
-            findViewById<android.view.View?>(R.id.btnOpenHint)?.setOnClickListener { requestOpenFile() }
+            findViewById<View?>(R.id.btnOpenHint)?.setOnClickListener { requestOpenFile() }
+
+            updateToolButtons()
+
+            // Listen for selection changes to update the chip
+            val selFilter = IntentFilter(ACTION_SELECTED_MESH_CHANGED)
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(selectionChangedReceiver, selFilter, android.content.Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(selectionChangedReceiver, selFilter)
+            }
 
             // Register receiver for separation CPU-done signal
             val sepFilter = IntentFilter(SeparationService.ACTION_SEPARATION_CPU_DONE)
@@ -152,8 +249,120 @@ class MainActivity : AppCompatActivity() {
     override fun onPause()   { super.onPause();   glView.onPause()   }
     override fun onDestroy() {
         try { unregisterReceiver(separationCpuDoneReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(selectionChangedReceiver)  } catch (_: Exception) {}
         glView.queueEvent { NativeLib.nativeDestroy() }
         super.onDestroy()
+    }
+
+    // ── Top-bar overflow menu (legacy actions) ────────────────────────────────
+    private fun showOverflowMenu(anchor: View) {
+        val popup = PopupMenu(this, anchor)
+        popup.menu.add(0, 1, 0, "Open Model…")
+        popup.menu.add(0, 2, 1, "Edit / Materials")
+        popup.menu.add(0, 3, 2, "Mesh List")
+        popup.menu.add(0, 4, 3, if (rulerActive) "Disable Ruler" else "Ruler")
+        popup.menu.add(0, 5, 4, "Screenshot")
+        popup.menu.add(0, 6, 5, "Export…")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.itemId) {
+                1 -> findViewById<View>(R.id.btnOpen).performClick()
+                2 -> findViewById<View>(R.id.btnEdit).performClick()
+                3 -> findViewById<View>(R.id.btnMeshList).performClick()
+                4 -> btnRuler?.performClick()
+                5 -> findViewById<View>(R.id.btnScreenshot).performClick()
+                6 -> findViewById<View>(R.id.btnExport).performClick()
+            }
+            true
+        }
+        popup.show()
+    }
+
+    // ── Bottom-toolbar tool dispatch ──────────────────────────────────────────
+    private fun onToolClicked(tool: Tool) {
+        // Toggle off if same tool tapped again
+        val newTool = if (activeTool == tool) Tool.NONE else tool
+        activeTool = newTool
+        updateToolButtons()
+
+        when (newTool) {
+            Tool.SELECT -> {
+                if (selectedMeshIdx < 0) {
+                    toast("Long-press a mesh on the canvas to select it")
+                }
+            }
+            Tool.MOVE, Tool.ROTATE, Tool.SCALE -> {
+                if (selectedMeshIdx < 0) {
+                    toast("Long-press a mesh on the canvas first, then choose a transform")
+                    activeTool = Tool.NONE
+                    updateToolButtons()
+                } else {
+                    findViewById<View>(R.id.btnMeshTools).performClick()
+                }
+            }
+            Tool.RING -> {
+                findViewById<View>(R.id.btnRingTool).performClick()
+            }
+            Tool.NONE -> { /* deactivated */ }
+        }
+    }
+
+    private fun updateToolButtons() {
+        val pairs = listOf(
+            Triple(btnToolSelect, icToolSelect, lblToolSelect) to (activeTool == Tool.SELECT),
+            Triple(btnToolMove,   icToolMove,   lblToolMove  ) to (activeTool == Tool.MOVE),
+            Triple(btnToolRotate, icToolRotate, lblToolRotate) to (activeTool == Tool.ROTATE),
+            Triple(btnToolScale,  icToolScale,  lblToolScale ) to (activeTool == Tool.SCALE),
+            Triple(btnToolRing,   icToolRing,   lblToolRing  ) to (activeTool == Tool.RING)
+        )
+        val activeBg     = ContextCompat.getDrawable(this, R.drawable.bg_tool_button_active)
+        val idleBg       = ContextCompat.getDrawable(this, R.drawable.bg_tool_button)
+        val activeIcon   = ContextCompat.getColor(this, R.color.tool_active_icon)
+        val activeLabel  = ContextCompat.getColor(this, R.color.tool_active_label)
+        val idleIcon     = ContextCompat.getColor(this, R.color.tool_idle_icon)
+        val idleLabel    = ContextCompat.getColor(this, R.color.tool_idle_label)
+        for ((triple, isActive) in pairs) {
+            val (btn, icon, label) = triple
+            btn?.background = if (isActive) activeBg else idleBg
+            icon?.setColorFilter(if (isActive) activeIcon else idleIcon)
+            label?.setTextColor(if (isActive) activeLabel else idleLabel)
+        }
+    }
+
+    // ── Selection chip / state ────────────────────────────────────────────────
+    private val selectionChangedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
+            if (intent.action != ACTION_SELECTED_MESH_CHANGED) return
+            val idx = intent.getIntExtra("idx", -1)
+            selectedMeshIdx = idx
+            if (idx < 0) {
+                runOnUiThread {
+                    selectionChip?.visibility = View.GONE
+                    tvSelectionLabel?.text = "No selection"
+                }
+            } else {
+                glView.queueEvent {
+                    val name = try { NativeLib.nativeGetMeshName(idx) } catch (_: Exception) { "Mesh #$idx" }
+                    runOnUiThread {
+                        selectionChip?.visibility = View.VISIBLE
+                        tvSelectionLabel?.text = "$name  ·  #$idx"
+                    }
+                }
+            }
+        }
+    }
+
+    private fun clearSelection() {
+        selectedMeshIdx = -1
+        selectionChip?.visibility = View.GONE
+        tvSelectionLabel?.text = "No selection"
+        // Tell native renderer to drop selection highlight
+        glView.queueEvent {
+            try { NativeLib.nativeSelectMesh(-1) } catch (_: Exception) {}
+        }
+        // Notify listeners
+        sendBroadcast(android.content.Intent(ACTION_SELECTED_MESH_CHANGED)
+            .putExtra("idx", -1)
+            .setPackage(packageName))
     }
 
     // ── Separation GPU upload ─────────────────────────────────────────────────
@@ -200,7 +409,6 @@ class MainActivity : AppCompatActivity() {
     private fun toggleRulerMode() {
         rulerActive = !rulerActive
         glView.mode = if (rulerActive) ModelGLSurfaceView.Mode.RULER else ModelGLSurfaceView.Mode.CAMERA
-        btnRuler?.alpha = if (rulerActive) 1.0f else 0.45f
         rulerOverlay?.visibility = if (rulerActive) View.VISIBLE else View.GONE
         if (!rulerActive) clearRuler()
         else tvRulerInfo?.text = "Tap mesh surface — Point 1"
@@ -512,14 +720,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ── Panels ────────────────────────────────────────────────────────────────
-    private fun openRingTool() {
-        if (supportFragmentManager.findFragmentByTag(RingToolFragment.TAG) != null) return
-        RingToolFragment.newInstance().show(supportFragmentManager, RingToolFragment.TAG)
+    private fun openRingTool(meshIdx: Int = -1) {
+        // Dismiss existing if open
+        (supportFragmentManager.findFragmentByTag(RingToolFragment.TAG)
+            as? RingToolFragment)?.dismiss()
+        RingToolFragment.newInstance(meshIdx).show(supportFragmentManager, RingToolFragment.TAG)
     }
-    private fun openMeshTools() {
-        if (supportFragmentManager.findFragmentByTag(MeshToolsFragment.TAG) != null) return
-        MeshToolsFragment.newInstance().show(supportFragmentManager, MeshToolsFragment.TAG)
+    private fun openMeshInfo() {
+        (supportFragmentManager.findFragmentByTag(MeshInfoFragment.TAG) as? MeshInfoFragment)?.dismiss()
+        MeshInfoFragment.newInstance().show(supportFragmentManager, MeshInfoFragment.TAG)
     }
+    // Keep old name for layout binding compatibility
+    private fun openMeshTools() = openMeshInfo()
     private fun openEditor() {
         if (supportFragmentManager.findFragmentByTag(EditorPanelFragment.TAG) != null) return
         EditorPanelFragment.newInstance().show(supportFragmentManager, EditorPanelFragment.TAG)
@@ -527,6 +739,136 @@ class MainActivity : AppCompatActivity() {
     private fun openMeshList() {
         if (supportFragmentManager.findFragmentByTag(MeshListFragment.TAG) != null) return
         MeshListFragment.newInstance().show(supportFragmentManager, MeshListFragment.TAG)
+    }
+
+    /**
+     * Long-press selection result handler.  Already runs on the UI thread
+     * (queued by ModelGLSurfaceView via post{}).  Toasts the user and fires a
+     * broadcast so any open editor sheet can re-target its controls.
+     */
+    private fun onMeshLongPressPicked(idx: Int) {
+        if (idx < 0) {
+            toast("Long-press a mesh surface to select it")
+            return
+        }
+        // Update native selection
+        glView.queueEvent { NativeLib.nativeSelectMesh(idx) }
+
+        // Fetch mesh info and show quick-action sheet
+        glView.queueEvent {
+            val name = try { NativeLib.nativeGetMeshName(idx) } catch (_: Exception) { "Mesh #$idx" }
+            val stats = try { NativeLib.nativeGetMeshStats(idx) } catch (_: Exception) { FloatArray(9) }
+            runOnUiThread {
+                // Update selection chip in toolbar
+                selectionChip?.visibility = View.VISIBLE
+                tvSelectionLabel?.text = "$name  ·  #$idx"
+
+                // Show a quick-action dialog for the selected mesh
+                showMeshQuickActions(idx, name, stats)
+
+                // Broadcast so ring tool / editor can retarget this mesh
+                sendBroadcast(android.content.Intent(ACTION_SELECTED_MESH_CHANGED)
+                    .putExtra("idx", idx)
+                    .setPackage(packageName))
+            }
+        }
+    }
+
+    /**
+     * Quick-action bottom dialog after long-pressing a mesh.
+     * Shows basic stats + actions: Edit, Ring Tool, Delete, Hide.
+     */
+    private fun showMeshQuickActions(idx: Int, name: String, stats: FloatArray) {
+        val ctx = this
+        val dlg = com.google.android.material.bottomsheet.BottomSheetDialog(ctx)
+        val root = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(0, 0, 0, 32)
+            setBackgroundResource(R.drawable.bg_bottom_sheet)
+        }
+
+        // Handle bar
+        root.addView(android.widget.LinearLayout(ctx).apply {
+            gravity = android.view.Gravity.CENTER_HORIZONTAL; setPadding(0,14,0,0)
+            addView(android.view.View(ctx).apply {
+                setBackgroundColor(android.graphics.Color.parseColor("#404058"))
+                layoutParams = android.widget.LinearLayout.LayoutParams(48,4)
+            })
+        })
+
+        // Title: name + stats
+        root.addView(android.widget.TextView(ctx).apply {
+            text = "💎  $name"
+            textSize = 15f; setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(android.graphics.Color.WHITE); setPadding(20,14,20,2)
+        })
+        if (stats.size >= 9) {
+            root.addView(android.widget.TextView(ctx).apply {
+                text = "%.0f K verts  ·  %.0f K tris  ·  %.1f mm³".format(
+                    stats[5]/1000f, stats[6]/1000f, stats[1])
+                textSize = 10f; setTextColor(android.graphics.Color.parseColor("#606080"))
+                setPadding(20,0,20,12)
+            })
+        }
+
+        // Divider
+        root.addView(android.view.View(ctx).apply {
+            setBackgroundColor(android.graphics.Color.parseColor("#1A1A28"))
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 1)
+        })
+
+        fun actionBtn(emoji: String, label: String, color: String, action: () -> Unit) =
+            android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(20,0,20,0)
+                minimumHeight = 56
+                isClickable = true; isFocusable = true
+                background = ctx.getDrawable(R.drawable.bg_top_bar_btn)
+                addView(android.widget.TextView(ctx).apply {
+                    text = emoji; textSize = 20f; setPadding(0,0,14,0)
+                })
+                addView(android.widget.TextView(ctx).apply {
+                    text = label; textSize = 13f
+                    setTextColor(android.graphics.Color.parseColor(color))
+                    layoutParams = android.widget.LinearLayout.LayoutParams(0,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                })
+                setOnClickListener { action(); dlg.dismiss() }
+            }
+
+        root.addView(actionBtn("✏️", "Edit Transform", "#00D4FF") { openEditor() })
+        root.addView(actionBtn("💍", "Ring Tool", "#FF9800") {
+            openRingTool(idx)  // pass selected idx to ring tool
+        })
+        root.addView(actionBtn("👁", "Toggle Visibility", "#9090B0") {
+            glView.queueEvent {
+                val vis = NativeLib.nativeGetMeshVisible(idx)
+                NativeLib.nativeSetMeshVisible(idx, !vis)
+            }
+        })
+        root.addView(actionBtn("🗑", "Delete Mesh", "#FF5252") {
+            glView.queueEvent { NativeLib.nativeDeleteMesh(idx) }
+            runOnUiThread {
+                selectionChip?.visibility = View.GONE
+                updateStatusBar()
+            }
+        })
+
+        val sv = android.widget.ScrollView(ctx)
+        sv.addView(root)
+        dlg.setContentView(sv)
+        dlg.show()
+    }
+
+    companion object {
+        /**
+         * Broadcast emitted whenever the long-press selection changes.
+         * Fragments (Transform Tool, Ring Tool) listen so their per-mesh
+         * controls retarget the freshly picked mesh.
+         */
+        const val ACTION_SELECTED_MESH_CHANGED = "com.modelviewer3d.SELECTED_MESH_CHANGED"
     }
 
     // ── Loading ───────────────────────────────────────────────────────────────

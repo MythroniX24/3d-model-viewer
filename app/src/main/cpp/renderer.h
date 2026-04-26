@@ -28,6 +28,11 @@ struct MeshObject {
     float colorR=0.72f,colorG=0.72f,colorB=0.92f;
     bool  visible=true;
     bool  selected=false;
+
+    // Per-mesh local-space bounding box, computed in uploadMeshObject().
+    // Used to draw a tight selection-overlay box and for per-mesh ray-pick.
+    float bboxMin[3] = { 0.f, 0.f, 0.f };
+    float bboxMax[3] = { 0.f, 0.f, 0.f };
 };
 
 
@@ -82,9 +87,15 @@ public:
     bool loadModel(const std::string& path);   // Legacy
 
     // Separation — called from JNI bridge (see jni_bridge.cpp)
-    void getRawData(std::vector<Vertex>& verts, std::vector<uint32_t>& idx) const;
+    void getRawData (std::vector<Vertex>& verts, std::vector<uint32_t>& idx) const;
+    void takeRawData(std::vector<Vertex>& verts, std::vector<uint32_t>& idx);
     bool loadSeparatedComponents(std::vector<MeshComponent>& comps);
     bool isSeparated() const { return m_isSeparated; }
+
+    // EGL context loss recovery — called from GL thread on Renderer.onSurfaceCreated
+    // when contextInitialized==true (the new context invalidated all GL handles).
+    void onContextLost();      // zero out GL handle ids, mark gpuReady=false
+    void rebuildContext();     // re-create shaders + re-upload all CPU vertex buffers
 
     // Camera
     void touchRotate(float dx, float dy);
@@ -98,6 +109,7 @@ public:
     void setScaleMM(float w,float h,float d);
     void mirrorX(); void mirrorY(); void mirrorZ();
     void resetTransform();
+    void resetAllTransforms();   // global + per-mesh, single undo snapshot
 
     // Visual
     void setColor(float r,float g,float b);
@@ -116,6 +128,19 @@ public:
     void setMeshScaleMM(int idx, float w, float h, float d);
     void getMeshSizeMM(int idx, float& w, float& h, float& d) const;
     int  getMeshVertexCount(int idx) const;
+
+    // ── Per-mesh independent transforms (Phase 2) ─────────────────────────────
+    // Apply rotation/translation to a single mesh — does NOT touch other meshes
+    // or the global transform.  Designed for the editor's Transform Tool which
+    // lets the user manipulate the long-pressed mesh in isolation.
+    void setMeshRotation   (int idx, float rx, float ry, float rz);
+    void setMeshTranslation(int idx, float px, float py, float pz);
+    /** out9 = [rx,ry,rz, px,py,pz, sx,sy,sz] — empty/identity if idx invalid */
+    void getMeshTransform  (int idx, float out9[9]) const;
+    void resetMeshTransform(int idx);
+
+    /** Ray-pick a mesh from screen coords. Returns mesh idx or -1. */
+    int  pickMesh(float sx, float sy, float sw, float sh);
 
     // ── Mesh processing (MeshLab/OpenSCAD inspired) ───────────────────────────
     bool decimateMesh(int meshIdx, float targetPercent);   // Garland-Heckbert QEM

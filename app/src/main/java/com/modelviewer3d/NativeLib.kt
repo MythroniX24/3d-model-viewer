@@ -7,6 +7,14 @@ object NativeLib {
     external fun nativeDraw()
     external fun nativeDestroy()
 
+    // EGL context loss recovery — call from GLSurfaceView.Renderer.onSurfaceCreated
+    // when contextInitialized was already true (i.e. the EGL context was lost
+    // and re-created).  nativeOnContextLost must be called BEFORE the new
+    // nativeInit so stale GL handle ids are scrubbed; nativeRebuildContext is
+    // called AFTER nativeInit to re-upload all CPU vertex buffers to the GPU.
+    external fun nativeOnContextLost()
+    external fun nativeRebuildContext()
+
     // Model loading (two-step parse → upload)
     external fun nativeParseModel(path: String): Boolean
     external fun nativeUploadParsed(): Boolean
@@ -32,6 +40,8 @@ object NativeLib {
     external fun nativeMirrorY()
     external fun nativeMirrorZ()
     external fun nativeResetTransform()
+    /** Reset BOTH global transform AND every per-mesh transform. Saves one undo entry. */
+    external fun nativeResetAllTransforms()
 
     // Visual
     external fun nativeSetColor(r: Float, g: Float, b: Float)
@@ -41,6 +51,10 @@ object NativeLib {
     external fun nativeSetBoundingBox(on: Boolean)
 
     // Undo/redo
+    /** Snapshot the current transform onto the undo stack. Call ONCE at slider DOWN —
+     *  setRotation/setTranslation/setScaleMM no longer push state internally, so
+     *  continuous slider drags produce exactly one undoable entry. */
+    external fun nativePushUndoState()
     external fun nativeUndo()
     external fun nativeRedo()
 
@@ -52,6 +66,10 @@ object NativeLib {
     external fun nativeGetMeshCount(): Int
     external fun nativeGetMeshName(idx: Int): String
     external fun nativeSelectMesh(idx: Int)
+    /** Returns the currently-selected mesh idx, or -1 if none. */
+    external fun nativeGetSelectedMesh(): Int
+    /** Ray-pick the front-most mesh under screen point (sx,sy). Returns idx or -1. */
+    external fun nativePickMesh(sx: Float, sy: Float, sw: Float, sh: Float): Int
     external fun nativeDeleteMesh(idx: Int)
     external fun nativeSetMeshVisible(idx: Int, visible: Boolean)
     external fun nativeGetMeshVisible(idx: Int): Boolean
@@ -59,6 +77,17 @@ object NativeLib {
     external fun nativeSetMeshScaleMM(idx: Int, w: Float, h: Float, d: Float)
     external fun nativeGetMeshSizeMM(idx: Int): FloatArray
     external fun nativeGetMeshVertexCount(idx: Int): Int
+
+    // ── Per-mesh independent transforms (Phase 2 Transform Tool) ─────────────
+    // Slider DOWN should call nativePushUndoState() once, then stream value
+    // changes through these setters — they intentionally do NOT push undo
+    // state so a continuous drag is one undoable entry.
+    external fun nativeSetMeshRotation(idx: Int, rx: Float, ry: Float, rz: Float)
+    external fun nativeSetMeshTranslation(idx: Int, px: Float, py: Float, pz: Float)
+    /** Returns [rx, ry, rz, px, py, pz, sx, sy, sz]; identity if idx invalid. */
+    external fun nativeGetMeshTransform(idx: Int): FloatArray
+    /** Reset per-mesh transform to identity. Pushes one undo entry. */
+    external fun nativeResetMeshTransform(idx: Int)
 
     // Export
     external fun nativeExportOBJ(path: String): Boolean

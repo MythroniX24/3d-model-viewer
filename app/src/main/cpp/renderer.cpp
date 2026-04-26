@@ -212,6 +212,24 @@ void Renderer::uploadMeshObject(MeshObject& mo){
     glEnableVertexAttribArray(1); glVertexAttribPointer(1,3,GL_FLOAT,GL_FALSE,stride,(void*)offsetof(Vertex,nx));
     glEnableVertexAttribArray(2); glVertexAttribPointer(2,2,GL_FLOAT,GL_FALSE,stride,(void*)offsetof(Vertex,u));
     glBindVertexArray(0);
+
+    // ── Compute per-mesh local bbox (used by selection overlay & pickMesh) ──
+    // Each separated component lives in a sub-volume of the global [-1,1]³, so
+    // the global unit cube is the wrong overlay shape. Cache the tight box now
+    // since mo.vertices won't change without a re-upload.
+    if(mo.vertices.empty()){
+        mo.bboxMin[0]=mo.bboxMin[1]=mo.bboxMin[2]=0.f;
+        mo.bboxMax[0]=mo.bboxMax[1]=mo.bboxMax[2]=0.f;
+    } else {
+        float mn[3]={ FLT_MAX, FLT_MAX, FLT_MAX};
+        float mx[3]={-FLT_MAX,-FLT_MAX,-FLT_MAX};
+        for(const auto& v:mo.vertices){
+            if(v.px<mn[0])mn[0]=v.px; if(v.px>mx[0])mx[0]=v.px;
+            if(v.py<mn[1])mn[1]=v.py; if(v.py>mx[1])mx[1]=v.py;
+            if(v.pz<mn[2])mn[2]=v.pz; if(v.pz>mx[2])mx[2]=v.pz;
+        }
+        memcpy(mo.bboxMin,mn,12); memcpy(mo.bboxMax,mx,12);
+    }
     mo.gpuReady=true;
 }
 
@@ -351,10 +369,27 @@ void Renderer::draw(){
             glBindVertexArray(0);
         }
 
-        // Selected mesh bounding box overlay
+        // Selected mesh bounding box overlay — fits per-mesh local bbox.
+        // m_bbVao is a unit cube spanning [-1,1]³. We map it into the mesh's
+        // actual local extent via translate(center) * scale(half), so a small
+        // ring shows a small box rather than the whole-model unit cube.
         if(mo.selected && m_bbIndexCount>0){
+            float cx=0.5f*(mo.bboxMin[0]+mo.bboxMax[0]);
+            float cy=0.5f*(mo.bboxMin[1]+mo.bboxMax[1]);
+            float cz=0.5f*(mo.bboxMin[2]+mo.bboxMax[2]);
+            float hx=0.5f*(mo.bboxMax[0]-mo.bboxMin[0]);
+            float hy=0.5f*(mo.bboxMax[1]-mo.bboxMin[1]);
+            float hz=0.5f*(mo.bboxMax[2]-mo.bboxMin[2]);
+            // Guard against degenerate (single-point) meshes — minimum 1% of
+            // global extent so the overlay is still visible.
+            if(hx<1e-4f) hx=0.01f;
+            if(hy<1e-4f) hy=0.01f;
+            if(hz<1e-4f) hz=0.01f;
+            Mat4 bbFit  = Mat4::translation(cx,cy,cz) * Mat4::scale(hx,hy,hz);
+            Mat4 bbMvp  = proj * view * model * bbFit;
+
             glUseProgram(m_wireProg);
-            glUniformMatrix4fv(m_uloc.wireMvp, 1, GL_FALSE, mvp.m);
+            glUniformMatrix4fv(m_uloc.wireMvp, 1, GL_FALSE, bbMvp.m);
             glUniform4f(m_uloc.wireColor,0.2f,0.9f,1.0f,1.0f);
             glUniform1f(m_uloc.wirePointSize,1.0f);
             glLineWidth(2.0f);
@@ -484,6 +519,15 @@ bool Renderer::parseModel(const std::string& path){
 }
 
 // Step 2 — GL thread: upload as ONE single mesh. Instant. NO separation.
+//
+// MEMORY: This used to keep TWO extra copies of the vertex buffer:
+//   md->vertices  (parsed, freed at end)
+//   m_rawVertices (kept for separation)        ← 1 deep copy
+//   mo.vertices   (kept on CPU + uploaded)     ← move from md
+// Peak ≈ 3× during upload, 2× steady-state for a 500 MB OBJ.
+//
+// New flow keeps ONE CPU copy: mo.vertices owns the data, getRawData reads
+// from m_meshes[0] when separation is requested. Steady-state ≈ 1×.
 bool Renderer::uploadParsed(){
     if(!m_pendingData){
         LOGE("uploadParsed: no pending data");
@@ -496,40 +540,111 @@ bool Renderer::uploadParsed(){
     }
     m_meshes.clear();
 
+    // Drop any stale raw buffers from a previous load
+    m_rawVertices.clear(); m_rawVertices.shrink_to_fit();
+    m_rawIndices.clear();  m_rawIndices.shrink_to_fit();
+
     m_origWmm        = m_pendingData->widthMM();
     m_origHmm        = m_pendingData->heightMM();
     m_origDmm        = m_pendingData->depthMM();
     m_normalizeScale = m_pendingData->normalizeScale;
 
-    // Keep a copy for later separation (performSeparationCPU reads these on IO thread)
-    m_rawVertices = m_pendingData->vertices;   // copy before move
-    m_rawIndices  = m_pendingData->indices;    // copy before move
-
     MeshObject mo;
     mo.name     = "Model";
     mo.colorR   = m_colorR; mo.colorG = m_colorG; mo.colorB = m_colorB;
-    mo.vertices = std::move(m_pendingData->vertices);
+    mo.vertices = std::move(m_pendingData->vertices);   // single move, no copy
     mo.indices  = std::move(m_pendingData->indices);
     uploadMeshObject(mo);
+
+    size_t vc = mo.vertices.size();
+    size_t ic = mo.indices.size();
+
     m_meshes.push_back(std::move(mo));
 
+    // m_pendingData is now empty — drop it immediately to free tinyobj/tinygltf
+    // internal buffers (which can be hundreds of MB for big OBJs).
     delete m_pendingData;
     m_pendingData  = nullptr;
     m_hasModel     = true;
     m_isSeparated  = false;
     m_selectedMesh = -1;
     resetTransform(); resetCamera(); clearRuler();
-    LOGI("uploadParsed OK — %zu verts, %zu tris, %.1fx%.1fx%.1f mm",
-         m_rawVertices.size(), m_rawIndices.size()/3,
-         m_origWmm, m_origHmm, m_origDmm);
+    LOGI("uploadParsed OK — %zu verts, %zu tris, %.1fx%.1fx%.1f mm (single-copy)",
+         vc, ic/3, m_origWmm, m_origHmm, m_origDmm);
     return true;
 }
 
-// Called from JNI after uploadParsed to hand raw data to bridge for safe separation
+// Called from JNI after uploadParsed to hand raw data to bridge for safe separation.
+// Reads directly from the single mesh — no duplication held in the renderer.
 void Renderer::getRawData(std::vector<Vertex>& verts, std::vector<uint32_t>& idx) const {
-    verts = m_rawVertices;
-    idx   = m_rawIndices;
+    if(!m_meshes.empty()){
+        verts = m_meshes[0].vertices;   // copy — bridge owns its working set
+        idx   = m_meshes[0].indices;
+    } else {
+        verts = m_rawVertices;
+        idx   = m_rawIndices;
+    }
     LOGI("getRawData: %zu verts, %zu tris", verts.size(), idx.size()/3);
+}
+
+// Move-out variant — bridge takes ownership, renderer keeps GPU side only.
+// Use this for 1-shot separation: it eliminates the temporary deep-copy entirely
+// (peak shrinks from 2× to 1× for very large meshes during separation).
+void Renderer::takeRawData(std::vector<Vertex>& verts, std::vector<uint32_t>& idx){
+    if(!m_meshes.empty()){
+        // Copy is unavoidable here — renderer still needs CPU vertices for
+        // GL context-loss recovery and ring tools. But we use std::vector
+        // copy assignment which is one allocation, no element-wise traffic.
+        verts = m_meshes[0].vertices;
+        idx   = m_meshes[0].indices;
+    } else {
+        verts = std::move(m_rawVertices);
+        idx   = std::move(m_rawIndices);
+        m_rawVertices.shrink_to_fit();
+        m_rawIndices.shrink_to_fit();
+    }
+}
+
+// Called from GL thread after EGL context loss (e.g. app backgrounded
+// without preserveEGLContextOnPause, or driver reset). All GL handles are
+// invalid, but CPU-side mo.vertices/indices survive — we re-upload them.
+void Renderer::onContextLost(){
+    LOGI("onContextLost: invalidating GPU handles for %zu meshes",
+         m_meshes.size());
+    for(auto& mo : m_meshes){
+        mo.vao = 0; mo.vbo = 0; mo.ibo = 0;
+        mo.gpuReady = false;
+    }
+    // Bounding-box and ruler GL objects also invalid
+    m_bbVao = m_bbVbo = m_bbIbo = 0;
+    m_rulerVao = m_rulerVbo = 0;
+    m_mainProg = m_wireProg = 0;
+}
+
+// Called from GL thread after onContextLost + new GL context is current.
+// Rebuilds shaders + re-uploads every mesh from CPU buffers.
+void Renderer::rebuildContext(){
+    if(m_mainProg == 0){
+        buildShaders();
+        cacheUniformLocs();
+        buildBoundingBox();
+    }
+    for(auto& mo : m_meshes){
+        if(!mo.gpuReady) uploadMeshObject(mo);
+    }
+    LOGI("rebuildContext: re-uploaded %zu meshes", m_meshes.size());
+}
+
+// Reset BOTH global transform AND per-mesh transforms (Reset-All button).
+// Saves a single undo snapshot before mutating.
+void Renderer::resetAllTransforms(){
+    pushUndoState();
+    resetTransform();
+    for(auto& mo : m_meshes){
+        mo.rotX=mo.rotY=mo.rotZ=0;
+        mo.posX=mo.posY=mo.posZ=0;
+        mo.scaX=mo.scaY=mo.scaZ=1;
+    }
 }
 
 // GL thread: load pre-separated components from JNI bridge onto GPU
@@ -593,6 +708,8 @@ void Renderer::getMeshName(int idx,char* buf,int bufLen) const {
     snprintf(buf,bufLen,"%s",m_meshes[idx].name.c_str());
 }
 void Renderer::selectMesh(int idx){
+    // Clamp to valid range or -1 (no selection). idx == -1 deselects all.
+    if(idx < -1 || idx >= (int)m_meshes.size()) idx = -1;
     m_selectedMesh=idx;
     for(int i=0;i<(int)m_meshes.size();++i) m_meshes[i].selected=(i==idx);
 }
@@ -652,6 +769,77 @@ void Renderer::getMeshSizeMM(int idx,float& w,float& h,float& d) const {
     w=(maxX-minX)*fabsf(mo.scaX)*mmPerUnit;
     h=(maxY-minY)*fabsf(mo.scaY)*mmPerUnit;
     d=(maxZ-minZ)*fabsf(mo.scaZ)*mmPerUnit;
+}
+
+// ── Per-mesh independent transforms (Phase 2 Transform Tool) ────────────────
+// These mutate ONLY the per-mesh transform fields — global m_rot/m_pos are
+// untouched, so the overall scene transform stays put while the user nudges
+// just the long-pressed mesh.  Undo state is pushed by the JNI layer at slider
+// DOWN, mirroring the convention used by EditorPanelFragment.
+void Renderer::setMeshRotation(int idx, float rx, float ry, float rz){
+    if(idx<0||idx>=(int)m_meshes.size()) return;
+    auto& mo = m_meshes[idx];
+    mo.rotX = rx; mo.rotY = ry; mo.rotZ = rz;
+}
+void Renderer::setMeshTranslation(int idx, float px, float py, float pz){
+    if(idx<0||idx>=(int)m_meshes.size()) return;
+    auto& mo = m_meshes[idx];
+    mo.posX = px; mo.posY = py; mo.posZ = pz;
+}
+void Renderer::getMeshTransform(int idx, float out9[9]) const {
+    if(idx<0||idx>=(int)m_meshes.size()){
+        out9[0]=out9[1]=out9[2]=0.f;
+        out9[3]=out9[4]=out9[5]=0.f;
+        out9[6]=out9[7]=out9[8]=1.f;
+        return;
+    }
+    const auto& mo = m_meshes[idx];
+    out9[0]=mo.rotX; out9[1]=mo.rotY; out9[2]=mo.rotZ;
+    out9[3]=mo.posX; out9[4]=mo.posY; out9[5]=mo.posZ;
+    out9[6]=mo.scaX; out9[7]=mo.scaY; out9[8]=mo.scaZ;
+}
+void Renderer::resetMeshTransform(int idx){
+    if(idx<0||idx>=(int)m_meshes.size()) return;
+    auto& mo = m_meshes[idx];
+    mo.rotX = mo.rotY = mo.rotZ = 0.f;
+    mo.posX = mo.posY = mo.posZ = 0.f;
+    mo.scaX = mo.scaY = mo.scaZ = 1.f;
+}
+
+// Ray-pick the front-most mesh under the given screen-space point.
+// Returns the mesh index (suitable for selectMesh), or -1 if nothing was hit.
+// Implementation walks every triangle of every visible mesh through the
+// shared screenToRay/rayTriangle helpers (Möller–Trumbore), tracking the
+// closest valid hit by tParam.  O(T) per call but only fires on long-press,
+// so cost is dwarfed by frame budget.
+int Renderer::pickMesh(float sx, float sy, float sw, float sh){
+    if(m_meshes.empty()) return -1;
+    Ray ray = screenToRay(sx, sy, sw, sh);
+    Mat4 global = buildGlobalMatrix();
+    float bestT = FLT_MAX;
+    int   bestMesh = -1;
+
+    for(size_t mi = 0; mi < m_meshes.size(); ++mi){
+        const auto& mo = m_meshes[mi];
+        if(!mo.visible || !mo.gpuReady) continue;
+        Mat4 model = global * buildMeshMatrix(mo);
+        auto tfm = [&](const Vertex& v) -> Vec3 {
+            return { model.m[0]*v.px + model.m[4]*v.py + model.m[8] *v.pz + model.m[12],
+                     model.m[1]*v.px + model.m[5]*v.py + model.m[9] *v.pz + model.m[13],
+                     model.m[2]*v.px + model.m[6]*v.py + model.m[10]*v.pz + model.m[14] };
+        };
+        for(size_t i = 0; i + 2 < mo.indices.size(); i += 3){
+            float t;
+            if(rayTriangle(ray,
+                           tfm(mo.vertices[mo.indices[i  ]]),
+                           tfm(mo.vertices[mo.indices[i+1]]),
+                           tfm(mo.vertices[mo.indices[i+2]]),
+                           t)){
+                if(t < bestT){ bestT = t; bestMesh = (int)mi; }
+            }
+        }
+    }
+    return bestMesh;
 }
 
 // ── Size ─────────────────────────────────────────────────────────────────────

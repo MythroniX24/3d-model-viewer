@@ -95,6 +95,10 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
             setTextColor(Color.parseColor("#9090B0"))
             setPadding(20, 8, 20, 2)
         }
+        // Sliders snapshot the current transform ONCE on touch DOWN (not every
+        // tick).  Continuous drags now produce exactly one undoable entry,
+        // instead of ~60 entries/second flooding the 50-deep stack and
+        // dropping older history within the first second of any drag.
         fun slider(min: Float, max: Float, init: Float, cb: (Float) -> Unit): SeekBar {
             val steps = 1000
             return SeekBar(ctx).apply {
@@ -107,7 +111,9 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
                     override fun onProgressChanged(b: SeekBar, p: Int, fromUser: Boolean) {
                         if (fromUser) cb(min + p.toFloat() / steps * (max - min))
                     }
-                    override fun onStartTrackingTouch(b: SeekBar) {}
+                    override fun onStartTrackingTouch(b: SeekBar) {
+                        glRun { NativeLib.nativePushUndoState() }
+                    }
                     override fun onStopTrackingTouch(b: SeekBar) {}
                 })
             }
@@ -283,7 +289,8 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
                 setOnClickListener {
                     rotX = 0f; rotY = 0f; rotZ = 0f
                     posX = 0f; posY = 0f; posZ = 0f
-                    glRun { NativeLib.nativeResetTransform() }
+                    // Reset BOTH global AND per-mesh transforms (one undo entry)
+                    glRun { NativeLib.nativeResetAllTransforms() }
                     // Reload the dimension fields after transform reset
                     (activity as? MainActivity)?.glView?.queueEvent {
                         try {

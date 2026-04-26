@@ -7,11 +7,20 @@ on:
     branches: [ main, master ]
   workflow_dispatch:    # Manual trigger from Actions tab
 
+# Cancel an in-flight build on the same ref when a new commit arrives.
+# Saves ~30-40 min of cold NDK builds when force-pushing or rebasing.
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build Debug + Release APK
     runs-on: ubuntu-latest
     timeout-minutes: 60   # NDK C++ builds can take 30-45 min cold
+    env:
+      # Push gradle into parallel + build-cache mode without editing gradle.properties
+      GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -XX:+HeapDumpOnOutOfMemoryError"
 
     steps:
       # ── 1. Checkout ──────────────────────────────────────────────────────────
@@ -80,6 +89,8 @@ jobs:
         run: |
           ./gradlew assembleDebug \
             --no-daemon \
+            --build-cache \
+            --parallel \
             --stacktrace \
             -Pandroid.ndkVersion=27.2.12479018
 
@@ -88,12 +99,22 @@ jobs:
         run: |
           ./gradlew assembleRelease \
             --no-daemon \
+            --build-cache \
+            --parallel \
             --stacktrace \
             -Pandroid.ndkVersion=27.2.12479018
 
       # ── 11. Show built APKs ───────────────────────────────────────────────────
       - name: List built APKs
         run: find app/build/outputs/apk -name "*.apk" -exec ls -lh {} \;
+
+      # ── 11b. Surface NDK link errors on failure ───────────────────────────────
+      - name: Show CMake error log on failure
+        if: failure()
+        run: |
+          echo "── Last 200 lines of any failed-build log ──"
+          find app/.cxx -name "*.log" -exec tail -n 200 {} \; 2>/dev/null || true
+          find app/build -name "build.gradle*.log" -exec tail -n 200 {} \; 2>/dev/null || true
 
       # ── 12. Upload Debug APK artifact ─────────────────────────────────────────
       - name: Upload Debug APK

@@ -71,6 +71,17 @@ private:
     std::vector<uint32_t>  m_stamp;      // generation stamp per vertex
     uint32_t               m_gen = 0;
 
+    // ── Pre-weld pass (Phase 2) ──────────────────────────────────────────────
+    // STL stores 3 unique vertices per triangle, so a naive Union-Find on
+    // shared-vertex edges produces 1 component per triangle.  We coalesce
+    // bit-equal positions onto a single canonical index BEFORE edge generation.
+    std::vector<uint32_t>  m_weldedIdx;  // triCount*3 — indices after spatial weld
+    std::vector<uint32_t>  m_weldRemap;  // vertCount  — original→canonical
+    void weldVerticesForSeparation(const Vertex* verts,
+                                   uint32_t       vertCount,
+                                   const uint32_t* idx,
+                                   uint32_t       triCount);
+
     // ── Core steps ────────────────────────────────────────────────────────────
     void genEdgesParallel(const uint32_t* idx, uint32_t triCount, int nthreads);
     void radixSort64(uint32_t n);

@@ -16,6 +16,12 @@ class ModelGLSurfaceView @JvmOverloads constructor(
     enum class Mode { CAMERA, RULER }
     var mode: Mode = Mode.CAMERA
     var onRulerPick: ((FloatArray) -> Unit)? = null
+    /**
+     * Long-press selection callback. Fires on the UI thread with the picked
+     * mesh idx, or -1 if nothing was hit.  MainActivity wires this to update
+     * the native selected-mesh state and notify open editor panels.
+     */
+    var onMeshLongPressPick: ((Int) -> Unit)? = null
 
     private var lastX  = 0f; private var lastY  = 0f
     private var lastMidX = 0f; private var lastMidY = 0f
@@ -60,6 +66,19 @@ class ModelGLSurfaceView @JvmOverloads constructor(
                     }
                 }
                 return true
+            }
+            // Long-press → ray-pick a mesh, update native selection, broadcast
+            // result back to the UI.  Only active in CAMERA mode so it never
+            // collides with ruler point-picking (which uses single-tap).
+            override fun onLongPress(e: MotionEvent) {
+                if (mode != Mode.CAMERA) return
+                val sx = e.x; val sy = e.y
+                val sw = width.toFloat(); val sh = height.toFloat()
+                queueEvent {
+                    val idx = NativeLib.nativePickMesh(sx, sy, sw, sh)
+                    if (idx >= 0) NativeLib.nativeSelectMesh(idx)
+                    post { onMeshLongPressPick?.invoke(idx) }
+                }
             }
         })
 

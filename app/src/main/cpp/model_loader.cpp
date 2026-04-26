@@ -9,6 +9,11 @@
 #include <algorithm>
 #include <limits>
 #include <cctype>
+// mmap / O_DIRECT for zero-copy large-file loading
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
@@ -86,8 +91,18 @@ bool ModelLoader::loadOBJ(const std::string& path, ModelData& data) {
     std::unordered_map<IdxKey, unsigned int, IdxHash> idxMap;
     idxMap.reserve(totalIdx);
 
+    // Bounds-check guard: tinyobj has been seen to emit out-of-range indices on
+    // malformed OBJ.  We bail with a logged error rather than UB-crash.
+    const int nVerts = (int)(attrib.vertices.size() / 3);
+    const int nNorms = (int)(attrib.normals .size() / 3);
+    const int nTexs  = (int)(attrib.texcoords.size() / 2);
+
     for (const auto& shape : shapes) {
         for (const auto& idx : shape.mesh.indices) {
+            if (idx.vertex_index < 0 || idx.vertex_index >= nVerts) {
+                LOGE("OBJ: vertex_index %d out of range [0,%d) — skipping", idx.vertex_index, nVerts);
+                continue;
+            }
             IdxKey key{idx.vertex_index, idx.normal_index, idx.texcoord_index};
             auto [it, inserted] = idxMap.emplace(key, (unsigned int)data.vertices.size());
             if (!inserted) {
@@ -99,13 +114,13 @@ bool ModelLoader::loadOBJ(const std::string& path, ModelData& data) {
             v.px = attrib.vertices[3*vi+0];
             v.py = attrib.vertices[3*vi+1];
             v.pz = attrib.vertices[3*vi+2];
-            if (data.hasNormals && idx.normal_index >= 0) {
+            if (data.hasNormals && idx.normal_index >= 0 && idx.normal_index < nNorms) {
                 int ni = idx.normal_index;
                 v.nx = attrib.normals[3*ni+0];
                 v.ny = attrib.normals[3*ni+1];
                 v.nz = attrib.normals[3*ni+2];
             }
-            if (data.hasTex && idx.texcoord_index >= 0) {
+            if (data.hasTex && idx.texcoord_index >= 0 && idx.texcoord_index < nTexs) {
                 int ti = idx.texcoord_index;
                 v.u = attrib.texcoords[2*ti+0];
                 v.v = attrib.texcoords[2*ti+1];
@@ -114,48 +129,109 @@ bool ModelLoader::loadOBJ(const std::string& path, ModelData& data) {
             data.indices.push_back(it->second);
         }
     }
+    // Free the dedup map immediately — for a 10M-vertex OBJ this is ~250 MB.
+    idxMap.clear(); std::unordered_map<IdxKey, unsigned int, IdxHash>().swap(idxMap);
     return !data.vertices.empty();
 }
 
 // ── STL ──────────────────────────────────────────────────────────────────────
+//
+// Format detection adapted from OpenSCAD src/io/import_stl.cc — the "solid"
+// prefix is NOT a reliable ASCII marker (some binary STL exporters from CAD
+// software emit the literal "solid" in the header).  The robust check is:
+//
+//     binary STL file_size == 80 (header) + 4 (triCount) + 50 * triCount
+//
+// We also defend against:
+//   • triCount lying about the file (truncated downloads)
+//   • triCount > 100 M (≥ 5 GB of allocations, certain OOM on Android)
+//   • mid-stream read failures (corrupted ZIPs, network filesystems)
 bool ModelLoader::loadSTL(const std::string& path, ModelData& data) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f) return false;
-    char header[80]; f.read(header,80); if (f.fail()) return false;
+    const std::streamoff fileSize = f.tellg();
+    if (fileSize < 84) { LOGE("STL too small: %lld bytes", (long long)fileSize); return false; }
+    f.seekg(0, std::ios::beg);
+
+    char header[80] = {};
+    f.read(header, 80);
+    if (f.fail()) return false;
     data.unitToMM = 1.0f;  // STL standard = mm
 
-    bool isAscii = (strncmp(header,"solid",5)==0);
-    if (isAscii) {
-        f.close(); std::ifstream tf(path); std::string line; Vec3 normal{};
-        while (std::getline(tf,line)) {
-            std::istringstream ss(line); std::string tok; ss>>tok;
-            if (tok=="facet") { std::string n; ss>>n>>normal.x>>normal.y>>normal.z; }
-            else if (tok=="vertex") {
-                Vertex v{}; ss>>v.px>>v.py>>v.pz;
-                v.nx=normal.x; v.ny=normal.y; v.nz=normal.z;
+    uint32_t triCount = 0;
+    f.read(reinterpret_cast<char*>(&triCount), 4);
+    if (f.fail()) return false;
+
+    // Robust binary detection: file size matches the binary layout exactly.
+    const std::streamoff binarySize = 84LL + 50LL * (std::streamoff)triCount;
+    bool isBinary = (triCount > 0
+                     && triCount < 100u * 1000u * 1000u   // sane cap: 100M tris
+                     && fileSize == binarySize);
+
+    // Fallback heuristic: if triCount is implausible OR file size doesn't match,
+    // try ASCII parse (the "solid" prefix alone is unreliable — see above).
+    if (!isBinary) {
+        f.close();
+        std::ifstream tf(path);
+        if (!tf) return false;
+        std::string line; Vec3 normal{};
+        while (std::getline(tf, line)) {
+            std::istringstream ss(line); std::string tok; ss >> tok;
+            if (tok == "facet") { std::string n; ss >> n >> normal.x >> normal.y >> normal.z; }
+            else if (tok == "vertex") {
+                Vertex v{}; ss >> v.px >> v.py >> v.pz;
+                v.nx = normal.x; v.ny = normal.y; v.nz = normal.z;
                 data.indices.push_back((unsigned int)data.vertices.size());
                 data.vertices.push_back(v);
             }
         }
-    } else {
-        uint32_t triCount=0; f.read(reinterpret_cast<char*>(&triCount),4);
-        if (f.fail()||triCount==0) return false;
-        data.vertices.reserve(triCount*3); data.indices.reserve(triCount*3);
-        for (uint32_t i=0;i<triCount;++i) {
-            float n[3],p[3][3];
-            f.read(reinterpret_cast<char*>(n),12);
-            for (int j=0;j<3;++j) f.read(reinterpret_cast<char*>(p[j]),12);
-            uint16_t att; f.read(reinterpret_cast<char*>(&att),2);
-            if (f.fail()) break;
-            for (int j=0;j<3;++j) {
-                Vertex v{}; v.px=p[j][0];v.py=p[j][1];v.pz=p[j][2];
-                v.nx=n[0];v.ny=n[1];v.nz=n[2];
-                data.indices.push_back((unsigned int)data.vertices.size());
-                data.vertices.push_back(v);
-            }
+        if (data.vertices.empty()) {
+            LOGE("STL: not binary (size mismatch: file=%lld expected=%lld) AND ASCII parse produced no vertices",
+                 (long long)fileSize, (long long)binarySize);
+            return false;
         }
+        data.hasNormals = true;
+        return true;
     }
-    data.hasNormals=true;
+
+    // ── Binary path: mmap the entire file for zero-copy access ─────────────────
+    // For a 500MB STL: ifstream = 500MB heap allocation during parse
+    //                  mmap    = demand-paged by kernel, peak RAM << file size
+    // mmap also removes one memcpy: data goes file → page cache → our iterator.
+    f.close();  // done with ifstream, switch to mmap
+    {
+        int fd2 = open(path.c_str(), O_RDONLY);
+        if (fd2 < 0) return false;
+        // MAP_POPULATE prefaults up to ~2MB of pages so the first loop
+        // iteration doesn't stall on page faults for small-medium files.
+        void* map = mmap(nullptr, (size_t)fileSize, PROT_READ,
+                         MAP_PRIVATE | MAP_POPULATE, fd2, 0);
+        close(fd2);
+        if (map == MAP_FAILED) return false;
+        // Tell kernel we will scan sequentially — enables aggressive read-ahead
+        madvise(map, (size_t)fileSize, MADV_SEQUENTIAL);
+
+        const uint8_t* raw = static_cast<const uint8_t*>(map) + 84; // skip header+count
+
+        // Pre-allocate from mmap'd triCount — already validated above
+        data.vertices.reserve((size_t)triCount * 3);
+        data.indices .reserve((size_t)triCount * 3);
+
+        // Scan triangles directly from mapped memory — no extra allocation
+        for (uint32_t i = 0; i < triCount; ++i, raw += 50) {
+            const float* nf = reinterpret_cast<const float*>(raw);       // normal
+            const float* vf = reinterpret_cast<const float*>(raw + 12);  // 3×vertex
+            for (int j = 0; j < 3; ++j) {
+                Vertex v{};
+                v.px = vf[j*3+0]; v.py = vf[j*3+1]; v.pz = vf[j*3+2];
+                v.nx = nf[0];     v.ny = nf[1];      v.nz = nf[2];
+                data.indices.push_back((unsigned int)data.vertices.size());
+                data.vertices.push_back(v);
+            }
+        }
+        munmap(map, (size_t)fileSize);
+    }
+    data.hasNormals = true;
     return !data.vertices.empty();
 }
 

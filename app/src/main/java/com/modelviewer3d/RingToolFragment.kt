@@ -38,7 +38,28 @@ class RingToolFragment : BottomSheetDialogFragment() {
     private val STEPS = 3000
 
     private var targetMeshIdx = 0
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        targetMeshIdx = arguments?.getInt("meshIdx", 0) ?: 0
+    }
     private var ringAnalyzed  = false
+
+    // ── Long-press selection sync ─────────────────────────────────────────────
+    // Updated whenever the user long-presses a mesh in the viewport — keeps
+    // the Ring Tool aimed at the most recently picked mesh instead of the old
+    // hard-coded #0.  EditText below also writes to targetMeshIdx for manual
+    // override.
+    private var etMeshIdx: android.widget.EditText? = null
+    private val selectedMeshChangedReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: android.content.Context, i: android.content.Intent) {
+            val newIdx = i.getIntExtra("idx", -1)
+            if (newIdx >= 0) {
+                targetMeshIdx = newIdx
+                etMeshIdx?.setText(newIdx.toString())
+            }
+        }
+    }
 
     // UI refs
     private var tvStatus:    TextView?  = null
@@ -117,12 +138,16 @@ class RingToolFragment : BottomSheetDialogFragment() {
                 setTextColor(Color.parseColor("#9090B0")); setPadding(0,0,12,0)
             })
             val etIdx = EditText(ctx).apply {
-                inputType = InputType.TYPE_CLASS_NUMBER; setText("0")
+                inputType = InputType.TYPE_CLASS_NUMBER
+                // Pre-fill with current selection so long-press → open Ring
+                // Tool "just works" without typing the index.
+                setText(targetMeshIdx.toString())
                 setTextColor(Color.WHITE); textSize = 13f
                 background = ctx.getDrawable(R.drawable.bg_input_field); setPadding(10,8,10,8)
                 layoutParams = LinearLayout.LayoutParams(80, LinearLayout.LayoutParams.WRAP_CONTENT)
                 addTextChangedListener(simpleWatcher { targetMeshIdx = text.toString().toIntOrNull() ?: 0 })
             }
+            etMeshIdx = etIdx
             addView(etIdx)
             addView(TextView(ctx).apply {
                 text = "  (0 = whole model)"; textSize = 9f
@@ -457,8 +482,40 @@ class RingToolFragment : BottomSheetDialogFragment() {
     private fun glRun(block: () -> Unit) =
         (activity as? MainActivity)?.glView?.queueEvent(block)
 
+    // ── Lifecycle: pre-fill target from native selection and listen for changes
+    override fun onStart() {
+        super.onStart()
+        val ctx = requireContext()
+        val filter = android.content.IntentFilter(MainActivity.ACTION_SELECTED_MESH_CHANGED)
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            ctx.registerReceiver(selectedMeshChangedReceiver, filter,
+                android.content.Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            ctx.registerReceiver(selectedMeshChangedReceiver, filter)
+        }
+        // Pull whatever's currently selected at open time
+        (activity as? MainActivity)?.glView?.queueEvent {
+            val idx = try { NativeLib.nativeGetSelectedMesh() } catch (_: Exception) { -1 }
+            if (idx >= 0) activity?.runOnUiThread {
+                targetMeshIdx = idx
+                etMeshIdx?.setText(idx.toString())
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try { requireContext().unregisterReceiver(selectedMeshChangedReceiver) } catch (_: Exception) {}
+    }
+
     companion object {
         const val TAG = "RingTool"
-        fun newInstance() = RingToolFragment()
+        private const val ARG_MESH_IDX = "meshIdx"
+        fun newInstance(meshIdx: Int = -1) = RingToolFragment().apply {
+            if (meshIdx >= 0) {
+                arguments = android.os.Bundle().apply { putInt(ARG_MESH_IDX, meshIdx) }
+            }
+        }
     }
 }

@@ -81,7 +81,7 @@ class MeshInfoFragment : BottomSheetDialogFragment() {
         val tvC = TextView(ctx).apply {
             text = "⏳ Computing mesh statistics…"
             textSize = 11f; setTextColor(Color.parseColor("#9090B0"))
-            fontFamily = "monospace"
+            typeface = android.graphics.Typeface.MONOSPACE
             background = ctx.getDrawable(R.drawable.bg_hint_card)
             setPadding(16, 16, 16, 16)
             layoutParams = LinearLayout.LayoutParams(

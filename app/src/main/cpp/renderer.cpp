@@ -1792,6 +1792,129 @@ void Renderer::applyRingDeformation(float newInnerN, float newOuterN) {
 }
 
 
+
+// ── PLY Export (Stanford format, ASCII) ──────────────────────────────────────
+bool Renderer::exportPLY(const std::string& path) const {
+    // Count visible verts + tris for header
+    size_t totalV = 0, totalT = 0;
+    Mat4 global = buildGlobalMatrix();
+    for (const auto& mo : m_meshes) {
+        if (!mo.visible) continue;
+        totalV += mo.vertices.size();
+        totalT += mo.indices.size() / 3;
+    }
+    if (!totalV || !totalT) return false;
+
+    std::ofstream f(path);
+    if (!f) return false;
+    f << "ply\nformat ascii 1.0\n";
+    f << "element vertex " << totalV << "\n";
+    f << "property float x\nproperty float y\nproperty float z\n";
+    f << "property float nx\nproperty float ny\nproperty float nz\n";
+    f << "element face " << totalT << "\n";
+    f << "property list uchar int vertex_indices\n";
+    f << "end_header\n";
+    f << std::fixed; f.precision(6);
+
+    float toMM = (m_normalizeScale > 1e-9f) ? (1.f / m_normalizeScale) : 1.f;
+    size_t baseV = 0;
+    for (const auto& mo : m_meshes) {
+        if (!mo.visible) continue;
+        Mat4 model = global * buildMeshMatrix(mo);
+        for (const auto& v : mo.vertices) {
+            Vec3 p = applyMat4Point(model, v.px, v.py, v.pz);
+            Vec3 n = applyMat4Normal(model, v.nx, v.ny, v.nz);
+            f << p.x*toMM << " " << p.y*toMM << " " << p.z*toMM << " "
+              << n.x << " " << n.y << " " << n.z << "\n";
+        }
+    }
+    size_t offset = 0;
+    for (const auto& mo : m_meshes) {
+        if (!mo.visible) continue;
+        for (size_t i = 0; i + 2 < mo.indices.size(); i += 3) {
+            f << "3 " << (offset + mo.indices[i]) << " "
+                      << (offset + mo.indices[i+1]) << " "
+                      << (offset + mo.indices[i+2]) << "\n";
+        }
+        offset += mo.vertices.size();
+    }
+    return true;
+}
+
+// ── Combine selected meshes into one ─────────────────────────────────────────
+// Fuses all selected mesh indices into a single MeshObject at index 0 of the
+// resulting mesh list. Other (unselected) meshes are kept intact.
+bool Renderer::combineMeshes(const std::vector<int>& indices) {
+    if (indices.size() < 2) return false;
+    // Validate all indices
+    for (int idx : indices) {
+        if (idx < 0 || idx >= (int)m_meshes.size()) return false;
+    }
+    pushUndoState();
+
+    Mat4 global = buildGlobalMatrix();
+    MeshObject combined;
+    combined.name = "Combined";
+    combined.colorR = m_meshes[indices[0]].colorR;
+    combined.colorG = m_meshes[indices[0]].colorG;
+    combined.colorB = m_meshes[indices[0]].colorB;
+    combined.scaX = combined.scaY = combined.scaZ = 1.f;
+
+    size_t baseVert = 0;
+    for (int idx : indices) {
+        const auto& mo = m_meshes[idx];
+        Mat4 model = global * buildMeshMatrix(mo);
+        for (const auto& v : mo.vertices) {
+            Vertex nv = v;
+            Vec3 p = applyMat4Point(model, v.px, v.py, v.pz);
+            Vec3 n = applyMat4Normal(model, v.nx, v.ny, v.nz);
+            nv.px = p.x; nv.py = p.y; nv.pz = p.z;
+            nv.nx = n.x; nv.ny = n.y; nv.nz = n.z;
+            combined.vertices.push_back(nv);
+        }
+        for (auto ind : mo.indices)
+            combined.indices.push_back((unsigned int)(ind + baseVert));
+        baseVert += mo.vertices.size();
+    }
+
+    // Upload combined mesh
+    uploadMeshObject(combined);
+
+    // Remove merged meshes (reverse order to keep indices valid)
+    std::vector<int> sorted = indices;
+    std::sort(sorted.rbegin(), sorted.rend());
+    for (int idx : sorted) {
+        if (m_meshes[idx].vao) glDeleteVertexArrays(1, &m_meshes[idx].vao);
+        if (m_meshes[idx].vbo) glDeleteBuffers(1, &m_meshes[idx].vbo);
+        if (m_meshes[idx].ibo) glDeleteBuffers(1, &m_meshes[idx].ibo);
+        m_meshes.erase(m_meshes.begin() + idx);
+    }
+    m_meshes.insert(m_meshes.begin(), std::move(combined));
+    m_selectedMesh = 0;
+    LOGI("combineMeshes: %zu meshes → 1 combined", indices.size());
+    return true;
+}
+
+// ── Per-mesh scale in mm (direct, no ratio) ───────────────────────────────────
+void Renderer::setMeshScaleMMDirect(int idx, float wMM, float hMM, float dMM) {
+    if (idx < 0 || idx >= (int)m_meshes.size()) return;
+    auto& mo = m_meshes[idx];
+    // Compute original bbox of this mesh
+    float mnX=FLT_MAX,mnY=FLT_MAX,mnZ=FLT_MAX;
+    float mxX=-FLT_MAX,mxY=-FLT_MAX,mxZ=-FLT_MAX;
+    for (const auto& v : mo.vertices) {
+        mnX=std::min(mnX,v.px); mxX=std::max(mxX,v.px);
+        mnY=std::min(mnY,v.py); mxY=std::max(mxY,v.py);
+        mnZ=std::min(mnZ,v.pz); mxZ=std::max(mxZ,v.pz);
+    }
+    float origW = (mxX-mnX); float origH = (mxY-mnY); float origD = (mxZ-mnZ);
+    float toNorm = (m_normalizeScale > 1e-9f) ? m_normalizeScale : 1.f;
+    // Scale factors: desired_mm * normalizeScale / original_normalized_size
+    if (origW > 1e-9f) mo.scaX = (wMM * toNorm) / origW;
+    if (origH > 1e-9f) mo.scaY = (hMM * toNorm) / origH;
+    if (origD > 1e-9f) mo.scaZ = (dMM * toNorm) / origD;
+}
+
 // ── Raycasting ───────────────────────────────────────────────────────────────
 Renderer::Ray Renderer::screenToRay(float sx,float sy,float sw,float sh) const {
     float ndcX=(2.0f*sx/sw)-1.0f;

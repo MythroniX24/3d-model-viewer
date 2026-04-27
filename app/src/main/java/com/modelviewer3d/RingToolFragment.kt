@@ -192,12 +192,14 @@ class RingToolFragment : BottomSheetDialogFragment() {
             onChange  = { v ->
                 if (ringAnalyzed && v != lastBWMM) {
                     lastBWMM = v
+                    // Queue deformation on GL thread and immediately request a frame
                     glRun { NativeLib.nativeSetRingBandWidth(v) }
+                    glRequestRender()
                     activity?.runOnUiThread {
                         updateBwInfo(v)
-                        // Notify EditorPanel to refresh its dimension display
-                        activity?.sendBroadcast(
-                            android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+                        // Notify EditorPanel — debounced (don't fire every pixel of slider)
+                        view?.removeCallbacks(broadcastDimsRunnable)
+                        view?.postDelayed(broadcastDimsRunnable, 250)
                     }
                 }
             }
@@ -218,10 +220,11 @@ class RingToolFragment : BottomSheetDialogFragment() {
                 if (ringAnalyzed && v != lastIDMM) {
                     lastIDMM = v
                     glRun { NativeLib.nativeSetRingInnerDiameter(v) }
+                    glRequestRender()
                     activity?.runOnUiThread {
                         updateIdInfo(v)
-                        activity?.sendBroadcast(
-                            android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+                        view?.removeCallbacks(broadcastDimsRunnable)
+                        view?.postDelayed(broadcastDimsRunnable, 250)
                     }
                 }
             }
@@ -479,6 +482,12 @@ class RingToolFragment : BottomSheetDialogFragment() {
         layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp)
     }
 
+    override fun onDestroyView() {
+        // Cancel any pending debounced broadcasts to prevent post-dismiss callbacks
+        view?.removeCallbacks(broadcastDimsRunnable)
+        super.onDestroyView()
+    }
+
     private fun glRun(block: () -> Unit) =
         (activity as? MainActivity)?.glView?.queueEvent(block)
 
@@ -507,6 +516,16 @@ class RingToolFragment : BottomSheetDialogFragment() {
     override fun onStop() {
         super.onStop()
         try { requireContext().unregisterReceiver(selectedMeshChangedReceiver) } catch (_: Exception) {}
+    }
+
+    // Debounced broadcast — fired 250ms after last slider movement
+    private val broadcastDimsRunnable = Runnable {
+        activity?.sendBroadcast(android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+    }
+
+    // Request a GL frame to be rendered — works with both CONTINUOUSLY and WHEN_DIRTY modes
+    private fun glRequestRender() {
+        (activity as? MainActivity)?.glView?.requestRender()
     }
 
     companion object {

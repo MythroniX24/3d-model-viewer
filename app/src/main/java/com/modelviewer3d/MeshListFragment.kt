@@ -24,8 +24,13 @@ class MeshListFragment : BottomSheetDialogFragment() {
 
     private var isSeparated   = false
     private var meshCount     = 0
-    private var selectedIdx   = -1
-    private val visibilityMap = mutableMapOf<Int, Boolean>()
+    private var selectedIdx      = -1
+    private val visibilityMap    = mutableMapOf<Int, Boolean>()
+    private val multiSelected    = mutableSetOf<Int>()
+    private var multiSelectMode  = false
+    private var tvMultiInfo:     TextView? = null
+    private var btnCombine:      Button?   = null
+    private var multiSelectBanner: View?   = null
 
     private var listContainer: LinearLayout? = null
     private var btnSeparate:   Button?       = null
@@ -431,10 +436,55 @@ class MeshListFragment : BottomSheetDialogFragment() {
         if (isSel) card.addView(buildResizeEditor(ctx, idx))
 
         card.setOnClickListener {
-            selectedIdx = if (selectedIdx == idx) -1 else idx
-            (activity as? MainActivity)?.glView?.queueEvent { NativeLib.nativeSelectMesh(selectedIdx) }
+            if (multiSelectMode) {
+                if (multiSelected.contains(idx)) multiSelected.remove(idx)
+                else multiSelected.add(idx)
+                buildMeshList()
+                updateMultiBanner()
+            }
+        card.setOnLongClickListener {
+            if (!multiSelectMode) {
+                multiSelectMode = true
+                updateMultiBanner()
+            }
+            multiSelected.add(idx)
+            buildMeshList()
+            updateMultiBanner()
+            true
+        } else {
+                selectedIdx = if (selectedIdx == idx) -1 else idx
+                (activity as? MainActivity)?.glView?.queueEvent { NativeLib.nativeSelectMesh(selectedIdx) }
+            }
             if (isAdded) buildMeshList(ctx)
         }
+
+        // Multiselect indicator OR per-mesh resize button
+        val bottomRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(12, 2, 12, 10)
+        }
+        if (multiSelectMode) {
+            bottomRow.addView(TextView(ctx).apply {
+                text = if (multiSelected.contains(idx)) "✓ Selected" else "Tap to select"
+                textSize = 9f
+                setTextColor(if (multiSelected.contains(idx)) Color.parseColor("#00D4FF")
+                             else Color.parseColor("#404060"))
+            })
+        } else {
+            bottomRow.addView(Button(ctx).apply {
+                text = "📐 Resize"
+                textSize = 9f; setTextColor(Color.parseColor("#606080"))
+                background = null; setPadding(0, 0, 0, 0)
+                setOnClickListener { showMeshResizeDialog(ctx, idx, name) }
+            })
+        }
+        card.addView(bottomRow)
+        card.setBackgroundResource(
+            if (multiSelectMode && multiSelected.contains(idx)) R.drawable.bg_card_selected
+            else if (!multiSelectMode && idx == selectedIdx) R.drawable.bg_card_selected
+            else R.drawable.bg_card_dark)
+
         return card
     }
 
@@ -549,6 +599,76 @@ class MeshListFragment : BottomSheetDialogFragment() {
 
     private fun toast(msg: String) =
         activity?.let { Toast.makeText(it, msg, Toast.LENGTH_SHORT).show() }
+
+    private fun showMeshResizeDialog(ctx: android.content.Context, idx: Int, name: String) {
+        val dlg = android.app.AlertDialog.Builder(ctx)
+        val layout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(32, 24, 32, 8)
+        }
+        layout.addView(TextView(ctx).apply {
+            text = "Resize: $name"; textSize = 13f
+            setTypeface(null, android.graphics.Typeface.BOLD); setTextColor(Color.BLACK)
+        })
+        val labels = listOf("Width mm", "Height mm", "Depth mm")
+        val fields = labels.map { lbl ->
+            LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(0, 8, 0, 0)
+            }.also { row ->
+                row.addView(TextView(ctx).apply {
+                    text = lbl; textSize = 11f; setTextColor(Color.GRAY)
+                    layoutParams = LinearLayout.LayoutParams(120, LinearLayout.LayoutParams.WRAP_CONTENT)
+                })
+                row.addView(android.widget.EditText(ctx).apply {
+                    inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+                    tag = lbl; setText("0.00")
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                })
+                layout.addView(row)
+            }
+        }
+        // Fetch current mesh size
+        (activity as? MainActivity)?.glView?.queueEvent {
+            val s = try { NativeLib.nativeGetMeshSizeMM(idx) } catch(_:Exception){ FloatArray(3) }
+            uiHandler.post {
+                val ets = layout.let { lay ->
+                    (0 until lay.childCount).mapNotNull { lay.getChildAt(it) as? LinearLayout }
+                        .mapNotNull { row -> (0 until row.childCount).mapNotNull { row.getChildAt(it) as? android.widget.EditText }.firstOrNull() }
+                }
+                if (ets.size >= 3 && s.size >= 3) {
+                    ets[0].setText("%.2f".format(s[0]))
+                    ets[1].setText("%.2f".format(s[1]))
+                    ets[2].setText("%.2f".format(s[2]))
+                }
+            }
+        }
+        dlg.setView(layout)
+        dlg.setPositiveButton("Apply") { _, _ ->
+            val ets = layout.let { lay ->
+                (0 until lay.childCount).mapNotNull { lay.getChildAt(it) as? LinearLayout }
+                    .mapNotNull { row -> (0 until row.childCount).mapNotNull { row.getChildAt(it) as? android.widget.EditText }.firstOrNull() }
+            }
+            val w = ets.getOrNull(0)?.text?.toString()?.toFloatOrNull() ?: return@setPositiveButton
+            val h = ets.getOrNull(1)?.text?.toString()?.toFloatOrNull() ?: return@setPositiveButton
+            val d = ets.getOrNull(2)?.text?.toString()?.toFloatOrNull() ?: return@setPositiveButton
+            (activity as? MainActivity)?.glView?.queueEvent {
+                NativeLib.nativeSetMeshScaleMMDirect(idx, w, h, d)
+            }
+            (activity as? MainActivity)?.sendBroadcast(
+                android.content.Intent(EditorPanelFragment.ACTION_DIMS_CHANGED))
+        }
+        dlg.setNegativeButton("Cancel", null)
+        dlg.show()
+    }
+
+    private fun updateMultiBanner() {
+        val active = multiSelectMode
+        multiSelectBanner?.visibility = if (active) View.VISIBLE else View.GONE
+        tvMultiInfo?.text = "${multiSelected.size} selected"
+        btnCombine?.isEnabled = multiSelected.size >= 2
+        btnCombine?.alpha = if (multiSelected.size >= 2) 1f else 0.4f
+    }
 
     companion object {
         const val TAG = "MeshList"

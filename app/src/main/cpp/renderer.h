@@ -161,6 +161,9 @@ public:
     // Export
     bool exportOBJ(const std::string& path) const;
     bool exportSTL(const std::string& path) const;
+    bool exportPLY(const std::string& path) const;   // Stanford PLY (text)
+    bool combineMeshes(const std::vector<int>& indices); // merge selected meshes into one
+    void setMeshScaleMMDirect(int idx, float w, float h, float d); // per-mesh scale (mm)
 
     // Ruler
     bool pickPoint(float sx,float sy,float sw,float sh,float out[3]);

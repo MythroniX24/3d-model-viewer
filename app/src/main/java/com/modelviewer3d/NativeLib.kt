@@ -119,5 +119,14 @@ object NativeLib {
     /** Remove zero-area / degenerate triangles */
     external fun nativeRemoveZeroAreaFaces(meshIdx: Int): Int
 
+    // ── New export formats ─────────────────────────────────────────────────────
+    external fun nativeExportPLY(path: String): Boolean
+
+    // ── Mesh combine + per-mesh scale ─────────────────────────────────────────
+    /** Merge meshes at given indices into a single mesh. Pushes one undo entry. */
+    external fun nativeCombineMeshes(indices: IntArray): Boolean
+    /** Set scale for one mesh directly in mm (independent of global scale). */
+    external fun nativeSetMeshScaleMMDirect(meshIdx: Int, w: Float, h: Float, d: Float)
+
     init { System.loadLibrary("modelviewer") }
 }

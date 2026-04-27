@@ -292,15 +292,17 @@ class MainActivity : AppCompatActivity() {
             }
             Tool.MOVE, Tool.ROTATE, Tool.SCALE -> {
                 if (selectedMeshIdx < 0) {
-                    toast("Long-press a mesh on the canvas first, then choose a transform")
+                    toast("Long-press a mesh to select it first, then choose Move/Rotate/Scale")
                     activeTool = Tool.NONE
                     updateToolButtons()
                 } else {
-                    findViewById<View>(R.id.btnMeshTools).performClick()
+                    // Open editor — NOT mesh info. This was the bug.
+                    openEditor()
                 }
             }
             Tool.RING -> {
-                findViewById<View>(R.id.btnRingTool).performClick()
+                // Pass selectedMeshIdx so ring tool auto-targets the selected mesh
+                openRingTool(selectedMeshIdx)
             }
             Tool.NONE -> { /* deactivated */ }
         }
@@ -522,7 +524,7 @@ class MainActivity : AppCompatActivity() {
      * No permission required.
      */
     private suspend fun saveToMediaStoreDownloads(fileName: String, format: String) {
-        val mimeType = when(format) { "obj" -> "model/obj"; "stl" -> "model/stl"; else -> "application/octet-stream" }
+        val mimeType = when(format) { "obj" -> "model/obj"; "stl" -> "model/stl"; "ply" -> "model/x-ply"; else -> "application/octet-stream" }
 
         // Write native export to cache first (native needs a real file path)
         val cacheFile = File(cacheDir, fileName)
@@ -605,6 +607,7 @@ class MainActivity : AppCompatActivity() {
                 ok = when (format) {
                     "obj" -> NativeLib.nativeExportOBJ(outFile.absolutePath)
                     "stl" -> NativeLib.nativeExportSTL(outFile.absolutePath)
+                    "ply" -> NativeLib.nativeExportPLY(outFile.absolutePath)
                     else  -> false
                 }
             } catch (_: Exception) {}

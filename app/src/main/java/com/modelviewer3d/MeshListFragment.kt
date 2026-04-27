@@ -441,21 +441,23 @@ class MeshListFragment : BottomSheetDialogFragment() {
                 else multiSelected.add(idx)
                 buildMeshList()
                 updateMultiBanner()
+            } else {
+                selectedIdx = if (selectedIdx == idx) -1 else idx
+                (activity as? MainActivity)?.glView?.queueEvent { NativeLib.nativeSelectMesh(selectedIdx) }
+                if (isAdded) buildMeshList()
             }
+        }
         card.setOnLongClickListener {
             if (!multiSelectMode) {
                 multiSelectMode = true
                 updateMultiBanner()
             }
-            multiSelected.add(idx)
+            if (!multiSelected.contains(idx)) {
+                multiSelected.add(idx)
+            }
             buildMeshList()
             updateMultiBanner()
             true
-        } else {
-                selectedIdx = if (selectedIdx == idx) -1 else idx
-                (activity as? MainActivity)?.glView?.queueEvent { NativeLib.nativeSelectMesh(selectedIdx) }
-            }
-            if (isAdded) buildMeshList(ctx)
         }
 
         // Multiselect indicator OR per-mesh resize button

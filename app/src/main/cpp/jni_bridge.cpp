@@ -447,10 +447,10 @@ JNIEXPORT jint JNICALL Java_com_modelviewer3d_NativeLib_nativeRemoveZeroAreaFace
 
 // ── New export + mesh ops ─────────────────────────────────────────────────────
 JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeExportPLY(JNIEnv* env,jclass,jstring path){
-    LOCK_OR_RETURN(JNI_FALSE); return g_renderer->exportPLY(jstr(env,path)) ? JNI_TRUE : JNI_FALSE;
+    LOCK_OR_FALSE(); return g_renderer->exportPLY(jstr(env,path)) ? JNI_TRUE : JNI_FALSE;
 }
 JNIEXPORT jboolean JNICALL Java_com_modelviewer3d_NativeLib_nativeCombineMeshes(JNIEnv* env,jclass,jintArray arr){
-    LOCK_OR_RETURN(JNI_FALSE);
+    LOCK_OR_FALSE();
     jint* data = env->GetIntArrayElements(arr,nullptr);
     jsize len  = env->GetArrayLength(arr);
     std::vector<int> idx(data, data+len);

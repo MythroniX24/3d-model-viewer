@@ -439,12 +439,12 @@ class MeshListFragment : BottomSheetDialogFragment() {
             if (multiSelectMode) {
                 if (multiSelected.contains(idx)) multiSelected.remove(idx)
                 else multiSelected.add(idx)
-                buildMeshList()
+                if (isAdded) buildMeshList(requireContext())
                 updateMultiBanner()
             } else {
                 selectedIdx = if (selectedIdx == idx) -1 else idx
                 (activity as? MainActivity)?.glView?.queueEvent { NativeLib.nativeSelectMesh(selectedIdx) }
-                if (isAdded) buildMeshList()
+                if (isAdded) buildMeshList(requireContext())
             }
         }
         card.setOnLongClickListener {
@@ -455,7 +455,7 @@ class MeshListFragment : BottomSheetDialogFragment() {
             if (!multiSelected.contains(idx)) {
                 multiSelected.add(idx)
             }
-            buildMeshList()
+            if (isAdded) buildMeshList(requireContext())
             updateMultiBanner()
             true
         }

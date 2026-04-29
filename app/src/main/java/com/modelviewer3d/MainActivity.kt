@@ -872,7 +872,8 @@ class MainActivity : AppCompatActivity() {
          * Fragments (Transform Tool, Ring Tool) listen so their per-mesh
          * controls retarget the freshly picked mesh.
          */
-        const     }
+        const val ACTION_SELECTED_MESH_CHANGED = "com.modelviewer3d.SELECTED_MESH_CHANGED"
+    }
 
     // ── Loading ───────────────────────────────────────────────────────────────
     private fun showLoading(msg: String, detail: String = "") {

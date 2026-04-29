@@ -866,13 +866,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        const val ACTION_SELECTED_MESH_CHANGED = "com.modelviewer3d.SELECTED_MESH_CHANGED"
         /**
          * Broadcast emitted whenever the long-press selection changes.
          * Fragments (Transform Tool, Ring Tool) listen so their per-mesh
          * controls retarget the freshly picked mesh.
          */
-        const val ACTION_SELECTED_MESH_CHANGED = "com.modelviewer3d.SELECTED_MESH_CHANGED"
-    }
+        const     }
 
     // ── Loading ───────────────────────────────────────────────────────────────
     private fun showLoading(msg: String, detail: String = "") {

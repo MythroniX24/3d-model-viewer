@@ -93,8 +93,66 @@ class MeshListFragment : BottomSheetDialogFragment() {
         titleRow.addView(tvCount)
         root.addView(titleRow)
 
+        // ── Multi-select banner ────────────────────────────────────────────────
+        val msRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setBackgroundColor(android.graphics.Color.parseColor("#0D1A26"))
+            setPadding(16, 10, 16, 10)
+            visibility = android.view.View.GONE
+        }
+        val tvMsInfo = TextView(ctx).apply {
+            text = "0 selected"; textSize = 11f
+            setTextColor(android.graphics.Color.parseColor("#00D4FF"))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        tvMultiInfo = tvMsInfo; msRow.addView(tvMsInfo)
+        val btnComb = Button(ctx).apply {
+            text = "⊕ Combine"; textSize = 10f
+            setTextColor(android.graphics.Color.parseColor("#050508"))
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            background = ctx.getDrawable(R.drawable.bg_btn_accent)
+            setPadding(16, 0, 16, 0)
+            isEnabled = false; alpha = 0.4f
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, 36).apply { setMargins(8,0,0,0) }
+            setOnClickListener {
+                val idxArr = multiSelected.toIntArray()
+                if (idxArr.size >= 2) {
+                    (activity as? MainActivity)?.glView?.queueEvent {
+                        val ok = NativeLib.nativeCombineMeshes(idxArr)
+                        uiHandler.post {
+                            if (ok) {
+                                multiSelected.clear(); multiSelectMode = false
+                                if (isAdded) buildMeshList(requireContext())
+                                updateMultiBanner()
+                                (activity as? MainActivity)?.updateStatusBar()
+                                activity?.sendBroadcast(android.content.Intent(
+                                    EditorPanelFragment.ACTION_DIMS_CHANGED))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        btnCombine = btnComb; msRow.addView(btnComb)
+        val btnExitMs = Button(ctx).apply {
+            text = "✕"; textSize = 11f
+            setTextColor(android.graphics.Color.parseColor("#FF5252"))
+            background = null; setPadding(16, 0, 4, 0)
+            setOnClickListener {
+                multiSelected.clear(); multiSelectMode = false
+                if (isAdded) buildMeshList(requireContext())
+                updateMultiBanner()
+            }
+        }
+        msRow.addView(btnExitMs)
+        multiSelectBanner = msRow
+        root.addView(msRow)
+        // ──────────────────────────────────────────────────────────────────────
+
         root.addView(View(ctx).apply {
-            setBackgroundColor(Color.parseColor("#1A1A28"))
+            setBackgroundColor(android.graphics.Color.parseColor("#1A1A28"))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 1).apply { setMargins(0, 10, 0, 0) }
         })
@@ -112,6 +170,34 @@ class MeshListFragment : BottomSheetDialogFragment() {
 
         refreshState(ctx)
         return scroll
+    }
+
+    // ── Sync canvas long-press selection to this list ────────────────────────
+    private val meshSelectedReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(ctx: android.content.Context, intent: android.content.Intent) {
+            val idx = intent.getIntExtra("idx", -1)
+            if (idx != selectedIdx) {
+                selectedIdx = idx
+                if (isAdded) buildMeshList(requireContext())
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val filter = android.content.IntentFilter(MainActivity.ACTION_SELECTED_MESH_CHANGED)
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            requireContext().registerReceiver(meshSelectedReceiver, filter,
+                android.content.Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            requireContext().registerReceiver(meshSelectedReceiver, filter)
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try { requireContext().unregisterReceiver(meshSelectedReceiver) } catch (_: Exception) {}
     }
 
     override fun onDestroyView() {

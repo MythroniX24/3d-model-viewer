@@ -406,12 +406,23 @@ class EditorPanelFragment : BottomSheetDialogFragment() {
         (activity as? MainActivity)?.glView?.queueEvent {
             try {
                 val s = NativeLib.nativeGetModelSizeMM()
+                // s[0..2] = original bbox mm, s[3..5] = current (after all deformations) bbox mm
                 val ow = s[0]; val oh = s[1]; val od = s[2]
-                val cw = s[3]; val ch = s[4]; val cd = s[5]
+                var cw = s[3]; var ch = s[4]; var cd = s[5]
+
+                // If ring tool has been used, read ring params to get accurate current size
+                // Ring deformation changes vertex positions → bounding box changes too
+                // nativeGetModelSizeMM() recomputes bbox from current vertices so s[3..5] IS current
+                // The issue was only that old code used s[0..2] for the fields. Now using s[3..5].
+
                 activity?.runOnUiThread {
-                    origWmm = ow; origHmm = oh; origDmm = od
-                    curWmm  = cw; curHmm  = ch; curDmm  = cd
+                    // Only update origWmm if it hasn't been set yet (first load)
+                    if (origWmm < 0.001f) {
+                        origWmm = ow; origHmm = oh; origDmm = od
+                    }
+                    curWmm = cw; curHmm = ch; curDmm = cd
                     tvOrigDims?.text = "Original: %.1f × %.1f × %.1f mm".format(ow, oh, od)
+                    // Always update the input fields to show CURRENT dimensions
                     silentSet(etW, cw); silentSet(etH, ch); silentSet(etD, cd)
                 }
             } catch (_: Exception) {}

@@ -197,9 +197,9 @@ class RingToolFragment : BottomSheetDialogFragment() {
                     glRequestRender()
                     activity?.runOnUiThread {
                         updateBwInfo(v)
-                        // Notify EditorPanel — debounced (don't fire every pixel of slider)
-                        view?.removeCallbacks(broadcastDimsRunnable)
-                        view?.postDelayed(broadcastDimsRunnable, 250)
+                        // Immediate broadcast so Editor dims update in real-time
+                        activity?.sendBroadcast(android.content.Intent(
+                            EditorPanelFragment.ACTION_DIMS_CHANGED))
                     }
                 }
             }
@@ -223,8 +223,9 @@ class RingToolFragment : BottomSheetDialogFragment() {
                     glRequestRender()
                     activity?.runOnUiThread {
                         updateIdInfo(v)
+                        activity?.sendBroadcast(android.content.Intent(
+                            EditorPanelFragment.ACTION_DIMS_CHANGED))
                         view?.removeCallbacks(broadcastDimsRunnable)
-                        view?.postDelayed(broadcastDimsRunnable, 250)
                     }
                 }
             }
@@ -263,11 +264,14 @@ class RingToolFragment : BottomSheetDialogFragment() {
             ringAnalyzed = false
             cardBW?.visibility = View.GONE
             cardID?.visibility = View.GONE
-            tvStatus?.text = "⏳  Detecting ring…"; tvStatus?.setTextColor(Color.parseColor("#FFD54F"))
+            // If -1 (no selection), try mesh 0 automatically
+            val analyzeIdx = if (targetMeshIdx < 0) 0 else targetMeshIdx
+            tvStatus?.text = "⏳  Detecting ring on mesh #$analyzeIdx…"
+            tvStatus?.setTextColor(Color.parseColor("#FFD54F"))
             tvInfo?.text = ""
 
             glRun {
-                val ok = NativeLib.nativeAnalyzeRing(targetMeshIdx)
+                val ok = NativeLib.nativeAnalyzeRing(analyzeIdx)
                 if (ok) {
                     val p = NativeLib.nativeGetRingParams()
                     activity?.runOnUiThread {
@@ -319,6 +323,8 @@ class RingToolFragment : BottomSheetDialogFragment() {
 
         cardBW?.visibility = View.VISIBLE
         cardID?.visibility = View.VISIBLE
+        // MUST be last — sliders fire onChange only when this is true
+        ringAnalyzed = true
     }
 
     private fun updateBwInfo(bwMM: Float) {
